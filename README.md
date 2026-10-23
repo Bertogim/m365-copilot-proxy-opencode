@@ -1,4 +1,6 @@
-# m365-copilot-proxy
+# m365-copilot-proxy-opencode
+
+> **Designed for use with OpenCode.** This fork adapts the Microsoft 365 Copilot proxy for use as an OpenAI-compatible backend in OpenCode.
 
 Use Microsoft 365 Copilot as an LLM backend for OpenAI-compatible coding agents like [pi](https://pi.dev/) and [OpenClaw](https://docs.openclaw.ai/). Wraps M365 Copilot's WebSocket/SignalR API in an OpenAI-compatible interface with tool calling support.
 
