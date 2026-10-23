@@ -1267,6 +1267,38 @@ describe("local history continuity regressions", () => {
     resetAgentRoutes();
   });
 
+  it("does not replay earlier history on an append-only tool continuation", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "```bash\nls\n```" },
+      { fullText: "Received." },
+    ];
+    const pool = new SessionPool();
+    const messages: any[] = [
+      { role: "user", content: "ORIGINAL_TASK_CONTEXT: repair the parser without changing ordering." },
+    ];
+    const first = await ask(pool, messages);
+    messages.push(
+      { role: "assistant", content: null, tool_calls: first.tool_calls },
+      { role: "tool", tool_call_id: first.tool_calls[0].id, content: "EARLIER_RESULT_CONTEXT: /project/parser" },
+      { role: "user", content: "LATEST_DECISION_CONTEXT: preserve comments as well." },
+    );
+    const second = await ask(pool, messages);
+    messages.push(
+      { role: "assistant", content: null, tool_calls: second.tool_calls },
+      { role: "tool", tool_call_id: second.tool_calls[0].id, content: "CURRENT_COMMAND_OUTPUT: parser.ts" },
+    );
+    await ask(pool, messages);
+    const sent = scripted.texts.at(-1)!;
+    expect(sent).not.toContain("ORIGINAL_TASK_CONTEXT");
+    expect(sent).not.toContain("LATEST_DECISION_CONTEXT");
+    expect(sent).not.toContain("EARLIER_RESULT_CONTEXT");
+    expect(sent).toContain("CURRENT_COMMAND_OUTPUT");
+    expect(sent).not.toContain("REFERENCE TRANSCRIPT");
+  });
+
   it("replays the task when an inserted system message shifts the history", async () => {
     scripted.result = null;
     scripted.texts = [];
@@ -1368,6 +1400,37 @@ describe("incremental streaming with workspace tools", () => {
     expect(JSON.parse(calls[0].function.arguments).command).toBe("pwd");
   });
 
+  it("continues streaming after an ordinary code example with a split header", async () => {
+    const deltas = [
+      "This example describes the configuration without executing any workspace tool. ",
+      "``",
+      "`j",
+      "son\n",
+      '{"enabled": true}\n',
+      "``",
+      "`\n",
+      "The explanation continues immediately after the example. ",
+      "Additional details must arrive before the final response is complete.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.join("")).toBe(deltas.join(""));
+    expect(content.some(text => text.includes("explanation continues"))).toBe(true);
+    expect(content[content.length - 1]).not.toContain("explanation continues");
+    expect(chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? [])).toHaveLength(0);
+  });
+
+  it("does not hold a short prose answer until the upstream turn finishes", async () => {
+    const deltas = [
+      "The configuration is valid and the parser preserves its original ordering. ",
+      "No additional changes are needed.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.length).toBeGreaterThan(1);
+    expect(content.join("")).toBe(deltas.join(""));
+  });
+
   it("does not rotate a conversation merely because object keys change order", async () => {
     scripted.newConversations = 0;
     scripted.queue = [{ fullText: "Received." }, { fullText: "Continued." }];
@@ -1464,6 +1527,9 @@ describe("synthetic proxy waiting indicator", () => {
             expect(prompt).not.toContain("My workflow preferences for this task:");
           } else {
             expect(prompt).toContain("dedicated patch or editing tool");
+            expect(prompt).toContain("[descriptive label](https://example.com/path)");
+            expect(prompt).toContain("Keep sentence punctuation outside the Markdown link");
+            expect(prompt).toContain("not file contents, code examples, or tool arguments");
             expect(prompt).toContain("Do not create .bak");
             expect(prompt).toContain("Keep shell output operational");
             expect(prompt).toContain("final plain-text response outside any tool block");

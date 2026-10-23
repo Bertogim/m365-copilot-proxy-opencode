@@ -28,6 +28,7 @@ import {
   formatMessages as formatCoreMessages,
   imageUrls,
   parseToolCalls,
+  buildSpecMap,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
   looksLikeRemoteArtifactCompletion,
@@ -566,6 +567,7 @@ export async function handleChatCompletion(
     ].includes(tone)) return formatted;
     return formatted + "\n\n" + [
       "My workflow preferences for this task:",
+      "Format clickable web links in user-facing responses as standard Markdown: [descriptive label](https://example.com/path). Do not write label (URL), wrap links in backticks, or emit HTML or terminal escape sequences. Keep sentence punctuation outside the Markdown link, preserve the exact destination URL, and do not invent URLs. These formatting rules apply to prose, not file contents, code examples, or tool arguments.",
       "Use the available dedicated patch or editing tool for file changes instead of Python, sed, or shell rewrites whenever it can express the change. Use only tools actually listed in this request, and follow their declared input format. Shell scripts remain appropriate for commands, tests, and transformations that genuinely need them.",
       "Do not create .bak, .backup, or timestamped backup copies by default, unless I ask for them or you are working on important changes where a backup provides meaningful recovery protection. Explain any backup you create in your final response. Preserve existing user changes and existing backups.",
       "Keep shell output operational: commands, test results, diagnostics, and actionable errors. Do not use print, echo, or printf to deliver explanations, progress narration, completion claims, caveats, or next steps intended for me.",
@@ -612,7 +614,7 @@ export async function handleChatCompletion(
       text = `${currentContext}\n\n${delta}`;
       // Only a tool result is the thing the note corrects the model about.
       if (conv.pendingNote && newMessages.some((m) => m.role === "tool")) {
-        text = `${conv.pendingNote}\n\n${currentContext}\n\n${delta}`;
+        text = `${conv.pendingNote}\n\n${text}`;
         log.info("Prepended the only-the-first-call-ran note (last reply was partly executed)");
       }
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, new=${newMessages.length}, turn=${session.turnCount}, mode=delta, cid=${convId}`);
@@ -925,7 +927,10 @@ export async function handleChatCompletion(
         }
         log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
-        text = "Please continue."; // M365 already has context
+        // An empty turn may not have consumed the request. Retry its actual
+        // prompt, including the task reference and command output, not a bare
+        // continuation that assumes the missing context exists upstream.
+        text = originalText;
       } else {
         // A model served only on a premium account, on a non-premium one (Opus
         // 4.8: BotConnection, `InternalError`, every time, with the agent and
@@ -1225,7 +1230,8 @@ export async function handleChatCompletion(
       let pending = "";
       let blocked = false;
       const markers = ["data:" + "image/", "iVBORw0KGgo", "/9j/", "UklGR", "!["];
-      if (hasTools) markers.push("```", "~~~", "<tool_", "<invoke", "<function");
+      if (hasTools) markers.push("<tool_", "<invoke", "<function");
+      const toolFenceNames = hasTools ? [...buildSpecMap(body.tools ?? []).keys()] : [];
       const liveDelta = (delta: string) => {
         if (!delta || blocked) return;
         pending += delta;
@@ -1246,9 +1252,31 @@ export async function handleChatCompletion(
           const index = lower.indexOf(marker.toLowerCase());
           if (index >= 0) end = Math.min(end, index);
         }
-        if (end < pending.length) blocked = true;
+        // A normal code example is prose, not a tool call. Hold only an
+        // incomplete fence header or a header recognised by the tool parser.
+        // Re-evaluate incomplete headers on every delta instead of permanently
+        // blocking the stream at the first backticks.
+        if (hasTools) {
+          const fences = /```([A-Za-z0-9_.-]*)([ \t]*)(\r?\n|$)/g;
+          for (const match of pending.matchAll(fences)) {
+            const name = match[1];
+            const incomplete = match[3] === "";
+            if (name && toolFenceNames.includes(name)) {
+              end = Math.min(end, match.index!);
+              blocked = true;
+              break;
+            }
+            if (incomplete && toolFenceNames.some(tool => tool.startsWith(name))) {
+              end = Math.min(end, match.index!);
+            }
+          }
+          // The opening backticks themselves may span several deltas.
+          const partialTicks = /`{1,2}$/.exec(pending);
+          if (partialTicks) end = Math.min(end, partialTicks.index);
+        }
+        if (markers.some(marker => lower.includes(marker.toLowerCase()))) blocked = true;
         // Delay tool-mode prose classification; never show a raw tool block.
-        if (hasTools && end < 160 && !blocked) return;
+        if (hasTools && pending.length < 48 && !blocked) return;
         if (!blocked) {
           for (const marker of markers) {
             for (let size = 1; size < marker.length; size++) {
@@ -1257,8 +1285,8 @@ export async function handleChatCompletion(
               }
             }
           }
-          // Retain a short tail for split refusal prefixes and image syntax.
-          end = Math.min(end, Math.max(0, pending.length - 24));
+          // Marker-prefix holdback above is sufficient; do not delay every
+          // ordinary token by a fixed 24-character tail.
         }
         if (end <= sent.length) return;
         const content = pending.slice(sent.length, end);
@@ -1410,7 +1438,11 @@ function priorityAccessResponse(exhaustion: PriorityAccessExhaustion, model: str
 
 function sseResponse(stream: ReadableStream): Response {
   return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
   });
 }
 
