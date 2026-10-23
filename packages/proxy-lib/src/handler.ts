@@ -25,7 +25,7 @@ import {
   couldBePriorityAccessPrefix,
   secondsUntilReset,
   type PriorityAccessExhaustion,
-  formatMessages,
+  formatMessages as formatCoreMessages,
   imageUrls,
   parseToolCalls,
   looksLikeConfabulation,
@@ -555,6 +555,23 @@ export async function handleChatCompletion(
   // claude-* string into GPT-tone + agent-suppressed — the confab quadrant we
   // observed. One resolved tone drives both.
   let tone = getToneForModel(model);
+  // Apply these workflow preferences to GPT-6 and Sol only, including
+  // full-history retries and the context refreshed on continued tool turns.
+  function formatMessages(...args: Parameters<typeof formatCoreMessages>): string {
+    const formatted = formatCoreMessages(...args);
+    if (!hasTools || ![
+      "Gpt_6_Reasoning",
+      "Gpt_6_Sol_Reasoning",
+      "Gpt_61_Sol_Reasoning",
+    ].includes(tone)) return formatted;
+    return formatted + "\n\n" + [
+      "My workflow preferences for this task:",
+      "Use the available dedicated patch or editing tool for file changes instead of Python, sed, or shell rewrites whenever it can express the change. Use only tools actually listed in this request, and follow their declared input format. Shell scripts remain appropriate for commands, tests, and transformations that genuinely need them.",
+      "Do not create .bak, .backup, or timestamped backup copies by default, unless I ask for them or you are working on important changes where a backup provides meaningful recovery protection. Explain any backup you create in your final response. Preserve existing user changes and existing backups.",
+      "Keep shell output operational: commands, test results, diagnostics, and actionable errors. Do not use print, echo, or printf to deliver explanations, progress narration, completion claims, caveats, or next steps intended for me.",
+      "After the real tool results confirm completion, put the important information in your final plain-text response outside any tool block: what changed, verification results, limitations, pending work, and commit/push status when relevant. Do not hide this information in shell output or comments. The final response may use several concise sentences when needed; completeness matters more than the earlier one-sentence suggestion.",
+    ].join("\n");
+  }
   // Framing default follows the MODEL (defaultFramingForModel): the Claude,
   // GPT-6 and GPT-6 Sol tones get a user-voice relay (Sonnet reads the
   // `<system>`-tagged baseline as an injected prompt; on Opus it trips the

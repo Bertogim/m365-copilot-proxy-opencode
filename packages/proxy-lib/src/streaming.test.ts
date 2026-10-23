@@ -1427,6 +1427,56 @@ describe("workspace framing on continued tool turns", () => {
 
 
 describe("synthetic proxy waiting indicator", () => {
+  it("refreshes GPT-6 workflow preferences on first and continued tool turns only", async () => {
+    const tools = [{
+      type: "function",
+      function: {
+        name: "bash",
+        parameters: { type: "object", properties: { command: { type: "string" } } },
+      },
+    }];
+    try {
+      for (const model of ["gpt-6-think-deeper", "gpt-6-sol", "gpt-6.1-sol", "claude-sonnet"]) {
+        scripted.result = null;
+        scripted.texts = [];
+        scripted.queue = [
+          { fullText: "```bash\npwd\n```" },
+          { fullText: "Done." },
+        ];
+        const pool = new SessionPool();
+        const messages: any[] = [{ role: "user", content: "Inspect this project." }];
+        const post = async () => {
+          const response = await handleChatCompletion(ChatCompletionRequest.parse({
+            model, stream: false, tools, messages,
+          }), pool);
+          expect(response.status).toBe(200);
+          return (await response.json()).choices[0].message;
+        };
+        const first = await post();
+        expect(first.tool_calls).toHaveLength(1);
+        messages.push(
+          { role: "assistant", content: null, tool_calls: first.tool_calls },
+          { role: "tool", tool_call_id: first.tool_calls[0].id, content: "/project" },
+        );
+        await post();
+        for (const prompt of scripted.texts) {
+          if (model === "claude-sonnet") {
+            expect(prompt).not.toContain("My workflow preferences for this task:");
+          } else {
+            expect(prompt).toContain("dedicated patch or editing tool");
+            expect(prompt).toContain("Do not create .bak");
+            expect(prompt).toContain("Keep shell output operational");
+            expect(prompt).toContain("final plain-text response outside any tool block");
+          }
+        }
+      }
+    } finally {
+      scripted.queue = [];
+      scripted.result = null;
+      resetAgentRoutes();
+    }
+  });
+
   async function silentTurn(model: string, disabled = false) {
     scripted.queue = [];
     scripted.result = null;
