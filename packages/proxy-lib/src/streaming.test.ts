@@ -1467,7 +1467,7 @@ describe("synthetic proxy waiting indicator", () => {
       const chunks = await silentTurn(model);
       const reasoning = chunks.map(c => c.choices?.[0]?.delta?.reasoning_content ?? "").join("");
       const content = chunks.map(c => c.choices?.[0]?.delta?.content ?? "").join("");
-      expect(reasoning).toContain("indicador del proxy");
+      expect(reasoning).toContain("El modelo est\u00e1 pensando internamente...");
       expect(reasoning).toContain("....");
       expect(content).toBe("Respuesta real.");
       expect(chunks.at(-1).choices[0].finish_reason).toBe("stop");

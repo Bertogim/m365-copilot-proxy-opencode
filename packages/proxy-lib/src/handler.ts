@@ -1192,7 +1192,7 @@ export async function handleChatCompletion(
       const waitingTimer = waitingEnabled ? setInterval(() => {
         if (opts.signal?.aborted || sent.length > 0 || waitingTicks >= 40) return;
         const status = waitingTicks++ === 0
-          ? "Esperando respuesta del modelo (indicador del proxy)..."
+          ? "El modelo está pensando internamente..."
           : ".";
         try {
           send({ ...base, choices: [{
