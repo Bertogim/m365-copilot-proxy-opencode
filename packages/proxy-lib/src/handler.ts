@@ -283,6 +283,19 @@ const UNSTREAMED_BUDGET_WAIT_LIMIT_MS = 2 * 60_000;
 type ChatBody = z.infer<typeof ChatCompletionRequest>;
 type ParsedMessage = ChatBody["messages"][number];
 
+// Stable object-key order prevents harmless JSON serialization changes from
+// being mistaken for rewritten history. Array order and all values stay intact.
+function messageSnapshot(message: ParsedMessage): string {
+  const stable = (value: any): any => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+    }
+    return value;
+  };
+  return JSON.stringify(stable(message));
+}
+
 // --- Per-conversation state ---
 
 interface ConversationState {
@@ -367,7 +380,7 @@ export class SessionPool {
       // whole history, so nothing the harness holds is lost.
       const historyChanged = existing.sentMessageSnapshot !== undefined &&
         existing.sentMessageSnapshot.some(
-          (previous, index) => JSON.stringify(messages[index]) !== previous,
+          (previous, index) => messageSnapshot(messages[index]) !== previous,
         );
       if (messages.length <= existing.sentMessageCount || historyChanged) {
         log.info(`Conversation ${fingerprint}: history changed or request is not an append-only continuation; starting a fresh M365 conversation with full history`);
@@ -572,10 +585,17 @@ export async function handleChatCompletion(
     inputImages = imageUrls(newMessages);
     const delta = newMessages.length > 0 ? formatDeltaMessages(newMessages, body.messages) : "";
     if (delta.length > 0) {
-      text = delta;
+      // Refresh the actual harness instructions and available tool schemas on
+      // every continuation. The upstream thread is not the local workspace:
+      // access always comes through the tools supplied by this request.
+      const currentContext = formatMessages(
+        body.messages.filter(message => message.role === "system"),
+        body.tools, body.tool_choice, convId, framingVariant,
+      );
+      text = `${currentContext}\n\n${delta}`;
       // Only a tool result is the thing the note corrects the model about.
       if (conv.pendingNote && newMessages.some((m) => m.role === "tool")) {
-        text = `${conv.pendingNote}\n\n${delta}`;
+        text = `${conv.pendingNote}\n\n${currentContext}\n\n${delta}`;
         log.info("Prepended the only-the-first-call-ran note (last reply was partly executed)");
       }
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, new=${newMessages.length}, turn=${session.turnCount}, mode=delta, cid=${convId}`);
@@ -668,7 +688,7 @@ export async function handleChatCompletion(
       try {
         for await (const delta of copilotStream) {
           fullText += delta;
-          // Buffer content until image payloads have been removed.
+          onDelta?.(delta);
           if (!earlyStop || earlyStop.signal.aborted) continue;
           // Measured on the stream's composed text, which has the heads that
           // arrive only as snapshots (#29) — a fence's opening line among them.
@@ -937,10 +957,10 @@ export async function handleChatCompletion(
       if (cutFabricated) log.info(`Model wrote its own <tool_response> — cut ${raw.length - cut.length} fabricated chars (stop sequence)`);
       return cut;
     };
-    const result = await runBuffered();
+    const result = await runBuffered(onDelta);
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length;
-    conv.sentMessageSnapshot = body.messages.map(message => JSON.stringify(message));
+    conv.sentMessageSnapshot = body.messages.map(messageSnapshot);
     let fullText = stopAtFabricatedResult(result.fullText);
 
     log.debug("Raw response (tool mode):", trunc(fullText, 1000));
@@ -974,7 +994,7 @@ export async function handleChatCompletion(
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
-      conv.sentMessageSnapshot = body.messages.map(message => JSON.stringify(message));
+      conv.sentMessageSnapshot = body.messages.map(messageSnapshot);
       fullText = stopAtFabricatedResult(retry.fullText);
       ({ parsed, judged } = parseReply(fullText, body.tools));
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
@@ -1070,7 +1090,7 @@ export async function handleChatCompletion(
     const result = await runBuffered(onDelta);
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length;
-    conv.sentMessageSnapshot = body.messages.map(message => JSON.stringify(message));
+    conv.sentMessageSnapshot = body.messages.map(messageSnapshot);
     return { kind: "text", text: result.fullText };
   }
 
@@ -1164,14 +1184,78 @@ export async function handleChatCompletion(
         try { send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: null }] }); } catch {}
       }, 15000);
 
-      // Content is buffered; only empty heartbeat chunks are sent while waiting.
-      const sent = "";
-      const liveDelta = undefined;
+      // Synthetic proxy status, NOT model reasoning. Keep it out of content
+      // and tool arguments. Clients without reasoning_content support ignore it.
+      const waitingEnabled = process.env.M365_WAIT_INDICATOR !== "0" &&
+        ["Gpt_6_Sol_Reasoning", "Gpt_61_Sol_Reasoning"].includes(tone);
+      let waitingTicks = 0;
+      const waitingTimer = waitingEnabled ? setInterval(() => {
+        if (opts.signal?.aborted || sent.length > 0 || waitingTicks >= 40) return;
+        const status = waitingTicks++ === 0
+          ? "Esperando respuesta del modelo (indicador del proxy)..."
+          : ".";
+        try {
+          send({ ...base, choices: [{
+            index: 0, delta: { reasoning_content: status }, finish_reason: null,
+          }] });
+        } catch {}
+      }, 3000) : undefined;
+
+      // Stream only an irrevocably safe prose prefix. Keep potential image
+      // payloads, tool fences and fabricated results buffered for final parsing.
+      // A suffix holdback catches markers split across arbitrary deltas.
+      let sent = "";
+      let pending = "";
+      let blocked = false;
+      const markers = ["data:" + "image/", "iVBORw0KGgo", "/9j/", "UklGR", "!["];
+      if (hasTools) markers.push("```", "~~~", "<tool_", "<invoke", "<function");
+      const liveDelta = (delta: string) => {
+        if (!delta || blocked) return;
+        pending += delta;
+        if (couldBePriorityAccessPrefix(pending)) return;
+        // Tool-mode retries may replace a refusal or a fabricated completion.
+        // Do not expose such a draft before the existing checks have judged it.
+        if (hasTools && (
+          looksLikeConfabulation(pending) ||
+          looksLikeHallucinatedCompletion(pending) ||
+          looksLikeRemoteArtifactCompletion(pending)
+        )) {
+          blocked = true;
+          return;
+        }
+        const lower = pending.toLowerCase();
+        let end = pending.length;
+        for (const marker of markers) {
+          const index = lower.indexOf(marker.toLowerCase());
+          if (index >= 0) end = Math.min(end, index);
+        }
+        if (end < pending.length) blocked = true;
+        // Delay tool-mode prose classification; never show a raw tool block.
+        if (hasTools && end < 160 && !blocked) return;
+        if (!blocked) {
+          for (const marker of markers) {
+            for (let size = 1; size < marker.length; size++) {
+              if (lower.endsWith(marker.slice(0, size).toLowerCase())) {
+                end = Math.min(end, pending.length - size);
+              }
+            }
+          }
+          // Retain a short tail for split refusal prefixes and image syntax.
+          end = Math.min(end, Math.max(0, pending.length - 24));
+        }
+        if (end <= sent.length) return;
+        const content = pending.slice(sent.length, end);
+        sent += content;
+        try {
+          send({ ...base, choices: [{ index: 0, delta: { content }, finish_reason: null }] });
+        } catch {}
+      };
 
       let p: Produced;
       try { p = await produce(liveDelta); }
       catch (err: any) { p = { kind: "error", resp: jsonResponse(502, { error: { message: err?.message ?? "stream error", type: "upstream_error" } }) }; }
       clearInterval(hb);
+      if (waitingTimer !== undefined) clearInterval(waitingTimer);
       try {
         if (p.kind === "error") {
           let message = "upstream error";

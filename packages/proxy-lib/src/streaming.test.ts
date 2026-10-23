@@ -147,13 +147,12 @@ async function streamContents(deltas: string[], fullText?: string): Promise<stri
 }
 
 describe("filtered streaming (non-tool path)", () => {
-  it("buffers content until image filtering finishes, preserving the complete answer", async () => {
-    const contents = await streamContents(["Hello", ", ", "world", "!"]);
-    // Intentional local policy: never expose unfiltered image payloads.
-    // SSE headers and keepalive chunks still arrive before the final content.
-    expect(contents.length).toBe(1);
+  it("streams ordinary prose incrementally while preserving the complete answer", async () => {
+    const contents = await streamContents(["Hello", ", ", "world", "! This is a longer answer.", " More text arrives now."]);
+    // Safe prose arrives in multiple chunks; image payloads remain filtered.
+    expect(contents.length).toBeGreaterThan(1);
     // Lossless and in-order: reconstructs the full answer exactly once.
-    expect(contents.join("")).toBe("Hello, world!");
+    expect(contents.join("")).toBe("Hello, world! This is a longer answer. More text arrives now.");
   });
 
   it("filters an image data URL even when its prefix spans multiple upstream deltas", async () => {
@@ -1315,5 +1314,173 @@ describe("local history continuity regressions", () => {
     const sent = scripted.texts[scripted.texts.length - 1];
     expect(sent).toContain("CORRECTED_OUTPUT_CONTEXT");
     expect(sent).toContain("TASK_CONTEXT_CORRECTION");
+  });
+});
+
+
+describe("incremental streaming with workspace tools", () => {
+  const tools = [{
+    type: "function",
+    function: { name: "bash", parameters: { type: "object", properties: { command: { type: "string" } } } },
+  }];
+
+  async function collect(deltas: string[]) {
+    scripted.result = null;
+    scripted.queue = [];
+    scripted.deltas = deltas;
+    scripted.fullText = undefined;
+    const response = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol", stream: true, tools,
+      messages: [{ role: "user", content: "Inspect the project." }],
+    }), new SessionPool());
+    const chunks = (await response.text()).split("\n")
+      .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map(line => JSON.parse(line.slice(6)));
+    return chunks;
+  }
+
+  afterEach(() => {
+    scripted.queue = [];
+    scripted.deltas = [];
+    scripted.fullText = undefined;
+    resetAgentRoutes();
+  });
+
+  it("streams prose in multiple chunks even when tools are available", async () => {
+    const deltas = [
+      "The parser reads the configuration and validates each entry before passing it to the next stage. ".repeat(3),
+      "The next stage keeps the original ordering and reports invalid entries explicitly. ",
+      "This preserves the intended behavior and makes the result easier to inspect.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.length).toBeGreaterThan(1);
+    expect(content.join("")).toBe(deltas.join(""));
+  });
+
+  it("never streams a raw tool fence split across upstream deltas", async () => {
+    const chunks = await collect(["`", "``ba", "sh\n", "pwd", "\n```"]);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("");
+    expect(content).toBe("");
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe("bash");
+    expect(JSON.parse(calls[0].function.arguments).command).toBe("pwd");
+  });
+
+  it("does not rotate a conversation merely because object keys change order", async () => {
+    scripted.newConversations = 0;
+    scripted.queue = [{ fullText: "Received." }, { fullText: "Continued." }];
+    const pool = new SessionPool();
+    const post = (messages: any[]) => handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol", stream: false, tools, messages,
+    }), pool);
+    await post([{ role: "user", content: "Keep this task context." }]);
+    await post([
+      { content: "Keep this task context.", role: "user" },
+      { role: "assistant", content: "Received." },
+      { role: "user", content: "Continue." },
+    ]);
+    expect(scripted.newConversations).toBe(0);
+  });
+});
+
+describe("workspace framing on continued tool turns", () => {
+  it("refreshes workspace instructions and tool definitions without rotating the thread", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.newConversations = 0;
+    scripted.queue = [{ fullText: "```bash\npwd\n```" }, { fullText: "Done." }];
+    const pool = new SessionPool();
+    const tools = [{
+      type: "function",
+      function: { name: "bash", parameters: { type: "object", properties: { command: { type: "string" } } } },
+    }];
+    const messages: any[] = [
+      { role: "system", content: "WORKSPACE_REFRESH: /project/real; use the local harness tools." },
+      { role: "user", content: "Inspect the current project." },
+    ];
+    const post = async () => {
+      const response = await handleChatCompletion(ChatCompletionRequest.parse({
+        model: "gpt-6.1-sol", stream: false, tools, messages,
+      }), pool);
+      expect(response.status).toBe(200);
+      return (await response.json()).choices[0].message;
+    };
+    try {
+      const first = await post();
+      messages.push(
+        { role: "assistant", content: null, tool_calls: first.tool_calls },
+        { role: "tool", tool_call_id: first.tool_calls[0].id, content: "/project/real" },
+      );
+      await post();
+      expect(scripted.newConversations).toBe(0);
+      expect(scripted.texts[1]).toContain("WORKSPACE_REFRESH");
+      expect(scripted.texts[1]).toContain("bash");
+      expect(scripted.texts[1]).toContain('<tool_response tool="bash"');
+    } finally {
+      scripted.queue = [];
+      resetAgentRoutes();
+    }
+  });
+});
+
+
+describe("synthetic proxy waiting indicator", () => {
+  async function silentTurn(model: string, disabled = false) {
+    scripted.queue = [];
+    scripted.result = null;
+    scripted.deltas = ["Respuesta real."];
+    scripted.fullText = "Respuesta real.";
+    let release!: () => void;
+    scripted.gate = new Promise<void>(resolve => { release = resolve; });
+    const previous = process.env.M365_WAIT_INDICATOR;
+    if (disabled) process.env.M365_WAIT_INDICATOR = "0";
+    else delete process.env.M365_WAIT_INDICATOR;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    try {
+      const pending = handleChatCompletion(ChatCompletionRequest.parse({
+        model, stream: true,
+        messages: [{ role: "user", content: "Describe the project." }],
+      }), new SessionPool()).then(response => response.text());
+      await vi.advanceTimersByTimeAsync(10_000);
+      release();
+      const text = await pending;
+      const chunks = text.split("\n")
+        .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+        .map(line => JSON.parse(line.slice(6)));
+      expect(vi.getTimerCount()).toBe(0);
+      return chunks;
+    } finally {
+      release();
+      scripted.gate = null;
+      scripted.deltas = [];
+      scripted.fullText = undefined;
+      if (previous === undefined) delete process.env.M365_WAIT_INDICATOR;
+      else process.env.M365_WAIT_INDICATOR = previous;
+      vi.useRealTimers();
+    }
+  }
+
+  for (const model of ["gpt-6-sol", "gpt-6.1-sol"]) {
+    it(`emits separate waiting dots for ${model}, without changing the answer`, async () => {
+      const chunks = await silentTurn(model);
+      const reasoning = chunks.map(c => c.choices?.[0]?.delta?.reasoning_content ?? "").join("");
+      const content = chunks.map(c => c.choices?.[0]?.delta?.content ?? "").join("");
+      expect(reasoning).toContain("indicador del proxy");
+      expect(reasoning).toContain("....");
+      expect(content).toBe("Respuesta real.");
+      expect(chunks.at(-1).choices[0].finish_reason).toBe("stop");
+    });
+  }
+
+  it("can be disabled explicitly", async () => {
+    const chunks = await silentTurn("gpt-6.1-sol", true);
+    expect(chunks.some(c => c.choices?.[0]?.delta?.reasoning_content)).toBe(false);
+  });
+
+  it("does not add synthetic reasoning to other models", async () => {
+    const chunks = await silentTurn("m365-copilot");
+    expect(chunks.some(c => c.choices?.[0]?.delta?.reasoning_content)).toBe(false);
   });
 });
