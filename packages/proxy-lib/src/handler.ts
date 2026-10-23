@@ -1271,7 +1271,8 @@ export async function handleChatCompletion(
             }
           }
           // The opening backticks themselves may span several deltas.
-          const partialTicks = /`{1,2}$/.exec(pending);
+          // Only hold when they look like a fence opener at start of line (not inline code).
+          const partialTicks = /(?:^|\r?\n)[ \t]*`{1,3}$/.exec(pending);
           if (partialTicks) end = Math.min(end, partialTicks.index);
         }
         if (markers.some(marker => lower.includes(marker.toLowerCase()))) blocked = true;

@@ -1431,6 +1431,21 @@ describe("incremental streaming with workspace tools", () => {
     expect(content.join("")).toBe(deltas.join(""));
   });
 
+  it("streams inline code spans with backticks progressively even when split across deltas", async () => {
+    const deltas = [
+      "- Added ",
+      "`party",
+      "Presence` ",
+      "to handle the new case. ",
+      "The fix ensures consistent behavior.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.length).toBeGreaterThan(1);
+    expect(content.join("")).toBe(deltas.join(""));
+    expect(chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? [])).toHaveLength(0);
+  });
+
   it("does not rotate a conversation merely because object keys change order", async () => {
     scripted.newConversations = 0;
     scripted.queue = [{ fullText: "Received." }, { fullText: "Continued." }];
