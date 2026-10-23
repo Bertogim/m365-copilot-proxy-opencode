@@ -146,13 +146,25 @@ async function streamContents(deltas: string[], fullText?: string): Promise<stri
   return contents;
 }
 
-describe("incremental streaming (non-tool path)", () => {
-  it("forwards deltas as separate chunks, not one buffered blob", async () => {
+describe("filtered streaming (non-tool path)", () => {
+  it("buffers content until image filtering finishes, preserving the complete answer", async () => {
     const contents = await streamContents(["Hello", ", ", "world", "!"]);
-    // Genuinely incremental: each delta is its own chunk.
-    expect(contents.length).toBeGreaterThan(1);
+    // Intentional local policy: never expose unfiltered image payloads.
+    // SSE headers and keepalive chunks still arrive before the final content.
+    expect(contents.length).toBe(1);
     // Lossless and in-order: reconstructs the full answer exactly once.
     expect(contents.join("")).toBe("Hello, world!");
+  });
+
+  it("filters an image data URL even when its prefix spans multiple upstream deltas", async () => {
+    // Invalid image bytes: no file should be saved, and no data URL may leak.
+    const contents = await streamContents(["Antes ", "data:im", "age/png;base64,", "AAAA", " despues"]);
+    const text = contents.join("");
+    expect(text).toContain("Antes ");
+    expect(text).toContain("despues");
+    expect(text).not.toContain("data:image");
+    expect(text).not.toContain("AAAA");
+    expect(text).toContain("Imagen omitida");
   });
 
   it("emits the trailing remainder once when the final text outruns the delta stream", async () => {
@@ -1223,5 +1235,85 @@ describe("stopping a turn that writes its own <tool_response> (early stop)", () 
     expect(scripted.signals.at(-1)?.aborted ?? false).toBe(false);
     expect(scripted.stoppedAfter).toBeNull();
     expect(JSON.parse(msg.tool_calls[0].function.arguments).command).toBe("ls");
+  });
+});
+
+
+describe("local history continuity regressions", () => {
+  const tools = [{
+    type: "function",
+    function: {
+      name: "bash",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+      },
+    },
+  }];
+
+  async function ask(pool: InstanceType<typeof SessionPool>, messages: any[]) {
+    const response = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol",
+      stream: false,
+      tools,
+      messages,
+    }), pool);
+    expect(response.status).toBe(200);
+    return (await response.json()).choices[0].message;
+  }
+
+  afterEach(() => {
+    scripted.queue = [];
+    scripted.result = null;
+    resetAgentRoutes();
+  });
+
+  it("replays the task when an inserted system message shifts the history", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "Received." },
+    ];
+    const pool = new SessionPool();
+    const opener = { role: "user", content: "TASK_CONTEXT_INSERTION: inspect the project, then fix its parser." };
+    const call = await ask(pool, [opener]);
+    await ask(pool, [
+      { role: "system", content: "WORKSPACE_CONTEXT_INSERTION: /project/parser" },
+      opener,
+      { role: "assistant", content: null, tool_calls: call.tool_calls },
+      { role: "tool", tool_call_id: call.tool_calls[0].id, content: "/project/parser" },
+    ]);
+    const sent = scripted.texts[scripted.texts.length - 1];
+    expect(sent).toContain("WORKSPACE_CONTEXT_INSERTION");
+    expect(sent).toContain("TASK_CONTEXT_INSERTION");
+  });
+
+  it("replays corrected earlier output instead of silently skipping it", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "Received." },
+      { fullText: "Received correction." },
+    ];
+    const pool = new SessionPool();
+    const opener = { role: "user", content: "TASK_CONTEXT_CORRECTION: inspect the project and keep working." };
+    const call = await ask(pool, [opener]);
+    const history: any[] = [
+      opener,
+      { role: "assistant", content: null, tool_calls: call.tool_calls },
+      { role: "tool", tool_call_id: call.tool_calls[0].id, content: "OLD_OUTPUT_CONTEXT" },
+    ];
+    await ask(pool, history);
+    await ask(pool, [
+      ...history.slice(0, 2),
+      { ...history[2], content: "CORRECTED_OUTPUT_CONTEXT: actual workspace is /project/real" },
+      { role: "assistant", content: "Received." },
+      { role: "user", content: "Continue the original task using the corrected output." },
+    ]);
+    const sent = scripted.texts[scripted.texts.length - 1];
+    expect(sent).toContain("CORRECTED_OUTPUT_CONTEXT");
+    expect(sent).toContain("TASK_CONTEXT_CORRECTION");
   });
 });

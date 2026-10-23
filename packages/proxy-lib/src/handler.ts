@@ -52,29 +52,171 @@ import type { z } from "zod/v4";
 
 const log = createLogger("handler");
 
-// Render generated images (§14) as markdown so any OpenAI-compatible client shows
-// them inline. The artifact URL 401s without the designerappservice token, so we
-// fetch the bytes ourselves and embed a self-contained data URI — a bare URL would
-// be useless to the client. On fetch failure we fall back to the raw URL so the
-// response is never silently empty.
+// Local conversation journal, enabled explicitly by the launcher.
+async function localChatEvent(cid: string, direction: string, model: string, payload: unknown) {
+  if (!process.env.M365_CHAT_DIR) return;
+  try {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    await fs.mkdir(process.env.M365_CHAT_DIR, { recursive: true, mode: 0o700 });
+    const filename = path.join(process.env.M365_CHAT_DIR,
+      cid.replace(/[^a-zA-Z0-9_-]/g, "_") + ".jsonl");
+    await fs.appendFile(filename,
+      JSON.stringify({ time: new Date().toISOString(), cid, direction, model, payload }) + "\n",
+      { mode: 0o600 });
+  } catch (error: any) {
+    log.info(`Local chat journal unavailable: ${error.message}`);
+  }
+}
+
+
+
+// Reserve a short filename atomically, without overwriting existing files.
+async function reserveImageFile(directory: string, extension: string) {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  for (let number = 1; number <= 1000000; number++) {
+    const filename = path.join(directory, `img${number}.${extension}`);
+    try {
+      const handle = await fs.open(filename, "wx", 0o600);
+      return { filename, handle };
+    } catch (error: any) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("No se encontro un nombre de imagen disponible.");
+}
+
+// Save generated images on the proxy machine, never embed them in chat.
 async function renderImagesMarkdown(images: CapturedImage[]): Promise<string> {
   if (images.length === 0) return "";
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const os = await import("node:os");
+  const directory = path.join(os.homedir(), "Imágenes");
+  const results: string[] = [];
   let artifactToken: string | null = null;
-  try { artifactToken = await getImageArtifactToken(); } catch (e: any) { log.info(`image token failed: ${e.message}`); }
-  const parts: string[] = [];
-  for (const img of images) {
-    const url = img.referenceUrls[0];
-    if (!url) continue;
-    if (artifactToken) {
-      try {
-        const { data, contentType } = await fetchImageBytes(url, artifactToken);
-        parts.push(`![generated image](data:${contentType};base64,${data.toString("base64")})`);
-        continue;
-      } catch (e: any) { log.info(`image fetch failed: ${e.message}`); }
-    }
-    parts.push(`![generated image](${url})`);
+  try {
+    await fs.mkdir(directory, { recursive: true });
+    artifactToken = await getImageArtifactToken();
+    if (!artifactToken) throw new Error("No se obtuvo el token de descarga de imagenes.");
+  } catch (error: any) {
+    log.info(`Image storage preparation failed: ${error.message}`);
+    return "No se ha guardado ninguna imagen: no se pudo preparar la carpeta "
+      + "~/Imágenes o autenticar la descarga. No afirmes que existe un archivo.";
   }
-  return parts.join("\n\n");
+  for (const image of images) {
+    const url = image.referenceUrls[0];
+    if (!url) {
+      results.push("Una imagen no se pudo guardar: falta su referencia de descarga.");
+      continue;
+    }
+    try {
+      const { data } = await fetchImageBytes(url, artifactToken!);
+      const bytes = Buffer.from(data);
+      let extension: string;
+      if (bytes.length >= 24 &&
+          bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+        extension = "png";
+      } else if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216 &&
+                 bytes[bytes.length - 2] === 255 && bytes[bytes.length - 1] === 217) {
+        extension = "jpg";
+      } else if (bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" &&
+                 bytes.toString("ascii", 8, 12) === "WEBP") {
+        extension = "webp";
+      } else {
+        throw new Error("La descarga no tiene una firma de imagen reconocida.");
+      }
+      const { filename, handle } = await reserveImageFile(directory, extension);
+      let complete = false;
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+        complete = true;
+      } finally {
+        await handle.close();
+        if (!complete) await fs.unlink(filename).catch(() => {});
+      }
+      results.push(`Imagen guardada en el equipo del proxy: ${filename}`);
+      log.info(`Image saved locally (${bytes.length} bytes)`);
+    } catch (error: any) {
+      log.info(`Image save failed: ${error.message}`);
+      results.push("Una imagen no se pudo guardar. No se devuelve su contenido ni un enlace remoto.");
+    }
+  }
+  return results.join("\n");
+}
+
+
+// Filter image payloads before exposing any response content to the client.
+async function sanitizeImagePayloads(text: string): Promise<string> {
+  if (!/data:image\/|iVBORw0KGgo|\/9j\/|UklGR/i.test(text)) return text;
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const os = await import("node:os");
+
+  const save = async (encoded: string): Promise<string> => {
+    try {
+      const compact = encoded.replace(/\s/g, "");
+      if (!compact || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact) ||
+          compact.length % 4 === 1) throw new Error("Invalid base64");
+      const bytes = Buffer.from(compact, "base64");
+      if (bytes.toString("base64").replace(/=+$/, "") !== compact.replace(/=+$/, "")) {
+        throw new Error("Invalid encoding");
+      }
+      let extension = "";
+      const pngEnd = Buffer.from([0,0,0,0,73,69,78,68,174,66,96,130]);
+      if (bytes.length >= 45 &&
+          bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) &&
+          bytes.subarray(-12).equals(pngEnd)) {
+        extension = "png";
+      } else if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216 &&
+                 bytes[bytes.length - 2] === 255 && bytes[bytes.length - 1] === 217) {
+        extension = "jpg";
+      } else if (bytes.length >= 12 &&
+                 bytes.toString("ascii", 0, 4) === "RIFF" &&
+                 bytes.toString("ascii", 8, 12) === "WEBP" &&
+                 bytes.readUInt32LE(4) + 8 === bytes.length) {
+        extension = "webp";
+      } else {
+        throw new Error("Unrecognized or incomplete image");
+      }
+      const directory = path.join(os.homedir(), "Imágenes");
+      await fs.mkdir(directory, { recursive: true });
+      const { filename, handle } = await reserveImageFile(directory, extension);
+      let complete = false;
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+        complete = true;
+      } finally {
+        await handle.close();
+        if (!complete) await fs.unlink(filename).catch(() => {});
+      }
+      return `Imagen guardada en el equipo del proxy: ${filename}`;
+    } catch {
+      return "[Imagen omitida: no se pudo guardar; no se ha confirmado ningun archivo.]";
+    }
+  };
+
+  const patterns = [
+    /!\[[^\]\r\n]*\]\(\s*data:image\/[^;,\s)]+;base64,([A-Za-z0-9+/=\r\n\t ]+)\s*\)/gi,
+    /data:image\/[^;,\s"'<>)]*;base64,([A-Za-z0-9+/=\r\n]+)/gi,
+    /((?:iVBORw0KGgo|\/9j\/|UklGR)[A-Za-z0-9+/=]{512,})/g,
+  ];
+  for (const pattern of patterns) {
+    let output = "";
+    let position = 0;
+    for (const match of text.matchAll(pattern)) {
+      output += text.slice(position, match.index) + await save(match[1]);
+      position = match.index! + match[0].length;
+    }
+    text = output + text.slice(position);
+  }
+  return text.replace(
+    /data:image\/[^\s"'<>)]*/gi,
+    "[Contenido de imagen omitido: formato no recuperable]"
+  );
 }
 
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
@@ -146,6 +288,8 @@ type ParsedMessage = ChatBody["messages"][number];
 interface ConversationState {
   session: ModelSession;
   sentMessageCount: number;
+  /** Exact serialized request prefix; counts alone cannot detect rewritten history. */
+  sentMessageSnapshot?: string[];
   lastAccessedAt: number;
   /** Sent ahead of the next tool result when the proxy executed less than the
    *  model wrote last turn (see executedOnlyFirstNote). */
@@ -221,10 +365,15 @@ export class SessionPool {
       // already created and verified" in an empty directory — and the pass rate
       // fell 7/10 → 4/10 → 3/10 over the sweep. The full prompt re-sends the
       // whole history, so nothing the harness holds is lost.
-      if (messages.length <= existing.sentMessageCount) {
-        log.info(`Conversation ${fingerprint}: not a continuation (${messages.length} <= ${existing.sentMessageCount} sent), starting a fresh M365 conversation`);
+      const historyChanged = existing.sentMessageSnapshot !== undefined &&
+        existing.sentMessageSnapshot.some(
+          (previous, index) => JSON.stringify(messages[index]) !== previous,
+        );
+      if (messages.length <= existing.sentMessageCount || historyChanged) {
+        log.info(`Conversation ${fingerprint}: history changed or request is not an append-only continuation; starting a fresh M365 conversation with full history`);
         existing.session.newConversation();
         existing.sentMessageCount = 0;
+        existing.sentMessageSnapshot = undefined;
         existing.pendingNote = null;
       }
       existing.lastAccessedAt = Date.now();
@@ -409,6 +558,8 @@ export async function handleChatCompletion(
   // so we only need to send new messages after the first turn.
   const isFirstTurn = session.turnCount === 0;
   const convId = session.conversationId;
+  await localChatEvent(convId, "ENTRA", model,
+    body.messages.slice(conv.sentMessageCount || 0).filter(m => m.role !== "system"));
   let text: string;
   // Images ride on the message that carries their text (core image-input.ts).
   let inputImages: string[];
@@ -517,7 +668,7 @@ export async function handleChatCompletion(
       try {
         for await (const delta of copilotStream) {
           fullText += delta;
-          onDelta?.(delta);
+          // Buffer content until image payloads have been removed.
           if (!earlyStop || earlyStop.signal.aborted) continue;
           // Measured on the stream's composed text, which has the heads that
           // arrive only as snapshots (#29) — a fence's opening line among them.
@@ -542,13 +693,14 @@ export async function handleChatCompletion(
       // chat text — so an image turn looks empty to the checks below and would burn
       // a retry. Render the image(s) into the response instead, and (for streaming)
       // emit the markdown as a trailing delta so the client isn't left with nothing.
+      fullText = await sanitizeImagePayloads(fullText);
       const images = copilotStream.images ?? [];
       if (images.length > 0) {
         const imageMd = await renderImagesMarkdown(images);
         if (imageMd) {
           const addition = fullText.length > 0 ? `\n\n${imageMd}` : imageMd;
           fullText += addition;
-          onDelta?.(addition);   // stream the appended markdown (text deltas already sent)
+          // Image paths are included only in the final filtered response.
         }
       }
 
@@ -771,7 +923,7 @@ export async function handleChatCompletion(
   // `onDelta` streams text to the client live (non-tool path only — see produce's
   // caller). Tool mode ignores it: the raw text is parsed for tool-call fences and
   // can't be shown verbatim, so it stays fully buffered.
-  async function produce(onDelta?: (delta: string) => void): Promise<Produced> {
+  async function produceRaw(onDelta?: (delta: string) => void): Promise<Produced> {
   // When tools are present, buffer full response to detect tool calls
   if (hasTools) {
     // A <tool_response> the model wrote itself is a stop sequence: everything
@@ -788,6 +940,7 @@ export async function handleChatCompletion(
     const result = await runBuffered();
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length;
+    conv.sentMessageSnapshot = body.messages.map(message => JSON.stringify(message));
     let fullText = stopAtFabricatedResult(result.fullText);
 
     log.debug("Raw response (tool mode):", trunc(fullText, 1000));
@@ -821,6 +974,7 @@ export async function handleChatCompletion(
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
+      conv.sentMessageSnapshot = body.messages.map(message => JSON.stringify(message));
       fullText = stopAtFabricatedResult(retry.fullText);
       ({ parsed, judged } = parseReply(fullText, body.tools));
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
@@ -916,9 +1070,55 @@ export async function handleChatCompletion(
     const result = await runBuffered(onDelta);
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length;
+    conv.sentMessageSnapshot = body.messages.map(message => JSON.stringify(message));
     return { kind: "text", text: result.fullText };
   }
-  } // end produce()
+
+  } // end produceRaw()
+
+  async function produce(onDelta?: (delta: string) => void): Promise<Produced> {
+    const result = await produceRaw(onDelta);
+    if (result.kind === "text") {
+      result.text = await sanitizeImagePayloads(result.text);
+    } else if (result.kind === "tools") {
+      const cleanValue = async (value: unknown): Promise<unknown> => {
+        if (typeof value === "string") return sanitizeImagePayloads(value);
+        if (Array.isArray(value)) return Promise.all(value.map(cleanValue));
+        if (value !== null && typeof value === "object") {
+          const entries = await Promise.all(Object.entries(value).map(
+            async ([key, item]) => [key, await cleanValue(item)] as const
+          ));
+          return Object.fromEntries(entries);
+        }
+        return value;
+      };
+      for (const call of result.toolCalls) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(call.function.arguments);
+        } catch {
+          call.function.arguments = await sanitizeImagePayloads(call.function.arguments);
+          continue;
+        }
+        call.function.arguments = JSON.stringify(await cleanValue(parsed));
+      }
+    } else {
+      const content = await sanitizeImagePayloads(await result.resp.text());
+      const headers = new Headers(result.resp.headers);
+      headers.delete("content-length");
+      result.resp = new Response(content, {
+        status: result.resp.status,
+        statusText: result.resp.statusText,
+        headers,
+      });
+    }
+    await localChatEvent(convId, "SALE", model,
+      result.kind === "error"
+        ? { status: result.resp.status, error: await result.resp.clone().text() }
+        : result);
+    return result;
+  }
+
 
   // --- Render: JSON (non-stream) or an early-flushed SSE stream (stream) ---
   const includeUsage = !!body.stream_options?.include_usage;
@@ -964,29 +1164,9 @@ export async function handleChatCompletion(
         try { send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: null }] }); } catch {}
       }, 15000);
 
-      // Live token passthrough (non-tool only). Track exactly what we've sent so the
-      // final render emits only the not-yet-streamed remainder. session.ts guarantees
-      // every forwarded delta extends the answer, so `sent` is always a prefix of the
-      // final text — the remainder is a clean tail, never a duplicate.
-      let sent = "";
-      // Hold the head of the stream until it can't be a priority-access refusal
-      // (Opus quota, §15): those arrive as ordinary content, so forwarding them
-      // live would put the refusal in front of the client before the 429 that
-      // replaces it — delivering exactly the confusion the 429 prevents. The
-      // gate releases within ~45 chars, i.e. one short delta on a normal turn.
-      let head = "";
-      let gated = true;
-      const liveDelta = hasTools ? undefined : (delta: string) => {
-        if (!delta) return;
-        if (gated) {
-          head += delta;
-          if (couldBePriorityAccessPrefix(head)) return; // still undecided — keep buffering
-          gated = false;
-          delta = head; // release everything held so far, in order
-        }
-        sent += delta;
-        try { send({ ...base, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] }); } catch {}
-      };
+      // Content is buffered; only empty heartbeat chunks are sent while waiting.
+      const sent = "";
+      const liveDelta = undefined;
 
       let p: Produced;
       try { p = await produce(liveDelta); }

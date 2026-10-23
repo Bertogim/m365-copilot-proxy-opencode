@@ -1362,7 +1362,28 @@ function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, u
     args[spec.editPair.search] = sr[1];
     args[spec.editPair.replace] = sr[2];
   } else if (spec.bodyParam !== undefined) {
-    args[spec.bodyParam] = rest;
+    const key = spec.bodyParam;
+    const type = spec.parameterTypes[key];
+    if (type === "array" || type === "object") {
+      // A structured body may be the value itself or a full arguments object.
+      // Never JSON-decode free-form string bodies (commands, patches, content).
+      let value: unknown = rest;
+      try {
+        const parsed: unknown = JSON.parse(rest);
+        value = parsed !== null && typeof parsed === "object" &&
+          !Array.isArray(parsed) && Object.prototype.hasOwnProperty.call(parsed, key)
+          ? (parsed as Record<string, unknown>)[key]
+          : parsed;
+      } catch {
+        // Preserve malformed input so the harness can reject it explicitly.
+      }
+      const matchesType = type === "array"
+        ? Array.isArray(value)
+        : value !== null && typeof value === "object" && !Array.isArray(value);
+      args[key] = matchesType ? value : rest;
+    } else {
+      args[key] = rest;
+    }
   }
 
   return args;
