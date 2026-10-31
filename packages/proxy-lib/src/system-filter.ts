@@ -15,8 +15,7 @@ import { readPromptFile } from "@m365-copilot/core";
 
 export interface PromptMessage {
   role: string;
-  content: unknown;
-  [key: string]: unknown;
+  content?: unknown;
 }
 
 const DISABLED = /^(0|off|false|no)$/i;
