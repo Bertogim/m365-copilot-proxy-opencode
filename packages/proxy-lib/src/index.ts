@@ -3,6 +3,7 @@ import { ChatCompletionRequest } from "./schemas.js";
 import { SessionPool, handleChatCompletion } from "./handler.js";
 
 export { SessionPool, handleChatCompletion } from "./handler.js";
+export { applySystemPrompt, stripHarnessPrompt, systemPromptOverride } from "./system-filter.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
 
 // Re-export tool utilities from core

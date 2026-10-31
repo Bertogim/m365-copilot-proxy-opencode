@@ -1,0 +1,1 @@
+The tool-block instructions are repeated above. Continue the task by writing exactly ONE fenced block (e.g. ```bash or ```patch) for the next step. The block runs on the user's machine, so no special tool access is needed. Do not explain, do not ask the user to run anything, and do not describe what you are about to do.

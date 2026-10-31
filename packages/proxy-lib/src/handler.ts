@@ -26,6 +26,7 @@ import {
   secondsUntilReset,
   type PriorityAccessExhaustion,
   formatMessages as formatCoreMessages,
+  readPromptFile,
   imageUrls,
   parseToolCalls,
   buildSpecMap,
@@ -48,7 +49,10 @@ import {
   type CapturedImage,
   type ParseResult,
 } from "@m365-copilot/core";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { ChatCompletionRequest } from "./schemas.js";
+import { applySystemPrompt } from "./system-filter.js";
 import type { z } from "zod/v4";
 
 const log = createLogger("handler");
@@ -222,8 +226,7 @@ async function sanitizeImagePayloads(text: string): Promise<string> {
 
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
 // inability to act instead of calling a tool. See the confab-retry loop below.
-const CONFAB_FORCE_PROMPT =
-  "The working directory and the files named in the task ARE present on a real filesystem right now. Do NOT ask me to paste anything, and do NOT say commands return no output — you have not run any command yet. Emit ONE ```bash block this turn: run `ls -la` and `cat` the relevant files. Output only the ```bash block, nothing else.";
+const CONFAB_FORCE_PROMPT = readPromptFile("nudges/confab.md");
 
 // The same give-up AFTER the model has already run tools. CONFAB_FORCE_PROMPT
 // says "you have not run any command yet" — false at that point, and the model
@@ -232,18 +235,24 @@ const CONFAB_FORCE_PROMPT =
 // `cat`", refusing the prompt's own instruction. The give-ups that reach here
 // follow an obstacle — no PDF tool or Word library installed — so say what is
 // true: the tools work, and a missing program is something to install.
-const MIDTASK_FORCE_PROMPT =
-  "Your tools are working: your previous command really ran on this machine, and its real output is in the last <tool_response>. Continue the task from there with ONE tool block for the next step. A missing program or library is not a missing tool — install it with the package manager (pip, npm, …) or do the job with what is already installed. Output only the tool block, nothing else.";
+const MIDTASK_FORCE_PROMPT = readPromptFile("nudges/midtask.md");
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
-const HALLUCINATION_FORCE_PROMPT =
-  "You have NOT actually done that — no tool ran this turn, so nothing changed on disk. Do not claim a file was created, replaced, or updated until a <tool_response> confirms it. Emit ONE ```bash block now that performs the change for real (write the file with a `cat > path <<'EOF' … EOF` heredoc), and nothing else.";
+const TOOLS_RESEND_PROMPT = readPromptFile("nudges/tools-resend.md");
+
+const HALLUCINATION_FORCE_PROMPT = readPromptFile("nudges/hallucination.md");
 
 // A Teams artifact belongs to M365's remote runtime and cannot be applied by a
 // local agent using only its basename. Force the intended mutation through the
 // harness tools instead of letting the remote patch leak into the conversation.
-const REMOTE_ARTIFACT_FORCE_PROMPT =
-  "The patch or download link you produced exists only in M365's remote environment and is NOT a file in the caller's working directory. Do NOT create, download, or apply a patch, and do NOT use a Teams artifact link. Use the provided local edit/write tool directly; if needed, emit ONE ```bash block that modifies the named local file in place. Output only that single local tool call, nothing else.";
+const REMOTE_ARTIFACT_FORCE_PROMPT = readPromptFile("nudges/remote-artifact.md");
+
+const CONTINUE_PROMPT = readPromptFile("nudges/continue.md");
+
+// Continuations send only the new messages (M365 keeps the framing server-side),
+// so the model loses the "act with a block" pressure exactly when it matters.
+// A one-line reminder on every delta turn keeps tool use the default.
+const TURN_REMINDER = process.env.M365_NO_TURN_REMINDER ? "" : readPromptFile("nudges/turn-reminder.md");
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -308,10 +317,6 @@ function requestsToolsRestore(messages: ParsedMessage[]): boolean {
   return latest !== undefined && restoreCommandOf(latest) === "tools";
 }
 
-/** The command is a control message, not part of the task: keep it out of the prompt. */
-function withoutRestoreCommand(messages: ParsedMessage[]): ParsedMessage[] {
-  return messages.filter(message => restoreCommandOf(message) === null);
-}
 
 /** Count actual transcript lines, not JSONL records or messages. */
 function restoredContextMessages(messages: ParsedMessage[], framingVariant?: string): ParsedMessage[] {
@@ -613,11 +618,105 @@ export function formatDeltaMessages(messages: ParsedMessage[], history: ParsedMe
  * Handle a chat completion request, returning an OpenAI-compatible Response.
  * The SessionPool routes each conversation to its own ModelSession.
  */
+// OpenCode asks the provider for a conversation title with a dedicated one-shot
+// request ("You name conversations so the user can find them later"). Answering it
+// upstream costs a whole M365 turn and, because the title request carries no tools
+// and a different prompt, a brand-new conversation — the thread budget. Serve it
+// locally from the first words of the message instead.
+const TITLE_REQUEST_MARKER = /You name conversations so the user can find them later/i;
+
+// Prompt audit (iniciar-proxy.sh --logs): write the request the harness sent and
+// the exact text the proxy converts it into, so both sides can be diffed.
+type PromptLog = { dir: string; base: string };
+let promptLogSeq = 0;
+
+function openPromptLog(body: ChatBody): PromptLog | null {
+  const dir = process.env.M365_PROMPT_LOG_DIR?.trim();
+  if (!dir) return null;
+  try {
+    mkdirSync(dir, { recursive: true });
+    promptLogSeq += 1;
+    const base = `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(promptLogSeq).padStart(3, "0")}`;
+    writeFileSync(join(dir, `${base}-original.json`), JSON.stringify({
+      model: body.model,
+      stream: body.stream,
+      tool_choice: body.tool_choice,
+      tools: body.tools ?? [],
+      messages: body.messages,
+    }, null, 2));
+    return { dir, base };
+  } catch {
+    return null;
+  }
+}
+
+function writePromptLog(target: PromptLog, name: string, text: string): void {
+  try {
+    writeFileSync(join(target.dir, `${target.base}-${name}`), text);
+  } catch {
+    /* audit only */
+  }
+}
+
+function titleFromRequest(body: ChatBody): string | null {
+  if (process.env.M365_LOCAL_TITLES === "0") return null;
+  if (body.tools && body.tools.length > 0) return null;
+  const isTitleRequest = body.messages.some(
+    (m) => m.role === "system" && TITLE_REQUEST_MARKER.test(getMessageContent(m)),
+  );
+  if (!isTitleRequest) return null;
+  const user = [...body.messages].reverse().find((m) => m.role === "user");
+  if (!user) return null;
+  let text = getMessageContent(user);
+  // The title prompt wraps the conversation opener in <message> blocks; take the
+  // first (the original request) rather than the "Reply with only the title" tail.
+  const block = /<message>\s*([\s\S]*?)\s*<\/message>/i.exec(text);
+  if (block) text = block[1];
+  text = text.replace(/^["'\s]+|["'\s]+$/g, "").replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  const words = text.split(" ").filter(Boolean);
+  return words.slice(0, 5).join(" ") + (words.length > 5 ? "..." : "");
+}
+
+function localTitleResponse(body: ChatBody, title: string): Response {
+  const created = Math.floor(Date.now() / 1000);
+  const id = `chatcmpl-title-${Date.now().toString(36)}`;
+  const usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  if (!body.stream) {
+    return jsonResponse(200, {
+      id, object: "chat.completion", created, model: body.model,
+      choices: [{ index: 0, message: { role: "assistant", content: title }, finish_reason: "stop" }],
+      usage,
+    });
+  }
+  const enc = new TextEncoder();
+  return sseResponse(new ReadableStream({
+    start(controller) {
+      const base = { id, object: "chat.completion.chunk", created, model: body.model };
+      const send = (obj: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      send({ ...base, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] });
+      send({ ...base, choices: [{ index: 0, delta: { content: title }, finish_reason: null }] });
+      send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+      if (body.stream_options?.include_usage) send({ ...base, choices: [], usage });
+      controller.enqueue(enc.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  }));
+}
+
 export async function handleChatCompletion(
   body: ChatBody,
   pool: SessionPool,
   opts: { signal?: AbortSignal } = {},
 ): Promise<Response> {
+  const localTitle = titleFromRequest(body);
+  if (localTitle) {
+    log.info(`title request: serving "${localTitle}" locally — no M365 turn`);
+    return localTitleResponse(body, localTitle);
+  }
+  const promptLog = openPromptLog(body);
+  let promptTurn = 0;
+  let rawTurn = 0;
   const conv = pool.resolve(body.messages, body.tools);
   const { session } = conv;
   const restoreContext = requestsContextRestore(body.messages);
@@ -688,21 +787,28 @@ export async function handleChatCompletion(
     if (restoreContext && args[0] === body.messages) {
       args[0] = restoredContextMessages(body.messages, args[4]);
     }
-    const formatted = formatCoreMessages(...args);
-    if (!hasTools || ![
-      "Gpt_6_Reasoning",
-      "Gpt_6_Sol_Reasoning",
-      "Gpt_61_Sol_Reasoning",
-    ].includes(tone)) return formatted;
-    return formatted + "\n\n" + [
-      "My workflow preferences for this task:",
-      "Format clickable web links in user-facing responses as standard Markdown: [descriptive label](https://example.com/path). Do not write label (URL), wrap links in backticks, or emit HTML or terminal escape sequences. Keep sentence punctuation outside the Markdown link, preserve the exact destination URL, and do not invent URLs. These formatting rules apply to prose, not file contents, code examples, or tool arguments.",
-      "Use the available dedicated patch or editing tool for file changes instead of Python, sed, or shell rewrites whenever it can express the change. Use only tools actually listed in this request, and follow their declared input format. Shell scripts remain appropriate for commands, tests, and transformations that genuinely need them.",
-      "Do not create .bak, .backup, or timestamped backup copies by default, unless I ask for them or you are working on important changes where a backup provides meaningful recovery protection. Explain any backup you create in your final response. Preserve existing user changes and existing backups.",
-      "Keep shell output operational: commands, test results, diagnostics, and actionable errors. Do not use print, echo, or printf to deliver explanations, progress narration, completion claims, caveats, or next steps intended for me.",
-      "After the real tool results confirm completion, put the important information in your final plain-text response outside any tool block: what changed, verification results, limitations, pending work, and commit/push status when relevant. Do not hide this information in shell output or comments. The final response may use several concise sentences when needed; completeness matters more than the earlier one-sentence suggestion.",
-    ].join("\n");
+    args[0] = applySystemPrompt(args[0]);
+    const output = formatCoreMessages(...args);
+    if (promptLog) {
+      promptTurn += 1;
+      writePromptLog(promptLog, `turn-${String(promptTurn).padStart(2, "0")}-converted.txt`, output);
+    }
+    return output;
   }
+  // A bare nudge ("Please continue.", a forcing retry) carries no <tools> block,
+  // and the model is right to answer that it cannot act without one. Re-send the
+  // framing + tools with just the nudge: M365 keeps the history server-side, so
+  // the delta stays one message. See hypotheses F99.
+  function toolNudge(instruction: string): string {
+    return formatMessages(
+      [{ role: "user", content: instruction }],
+      body.tools,
+      body.tool_choice,
+      session.conversationId,
+      framingVariant,
+    );
+  }
+
   // Framing default follows the MODEL (defaultFramingForModel): the Claude,
   // GPT-6 and GPT-6 Sol tones get a user-voice relay (Sonnet reads the
   // `<system>`-tagged baseline as an injected prompt; on Opus it trips the
@@ -725,9 +831,9 @@ export async function handleChatCompletion(
   // Images ride on the message that carries their text (core image-input.ts).
   let inputImages: string[];
   if (restoreTools) {
-    // Full history minus the command, with the tool definitions and framing the
-    // harness sent on this request. No newConversation(): this is a nudge.
-    text = formatMessages(withoutRestoreCommand(body.messages), body.tools, body.tool_choice, convId, framingVariant);
+    // Same conversation, same server-side history: only the tool block/framing
+    // with the nudge. No newConversation(), no replay.
+    text = toolNudge(TOOLS_RESEND_PROMPT);
     inputImages = imageUrls(body.messages);
     log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=restore-tools, cid=${convId}`);
   } else if (restoreContext || isFirstTurn || conv.sentMessageCount === 0) {
@@ -741,7 +847,7 @@ export async function handleChatCompletion(
     if (delta.length > 0) {
       // The upstream conversation retains its initial framing, tool schemas
       // and workflow preferences. Send only new messages on continuations.
-      text = delta;
+      text = TURN_REMINDER ? `${TURN_REMINDER}\n\n${delta}` : delta;
       // Only a tool result is the thing the note corrects the model about.
       if (conv.pendingNote && newMessages.some((m) => m.role === "tool")) {
         text = `${conv.pendingNote}\n\n${text}`;
@@ -749,8 +855,9 @@ export async function handleChatCompletion(
       }
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, new=${newMessages.length}, turn=${session.turnCount}, mode=delta, cid=${convId}`);
     } else {
-      // No meaningful new content to send — nudge M365 to continue.
-      text = "Please continue.";
+      // No meaningful new content to send — nudge M365 to continue, with the
+      // tool block when this is a tool request.
+      text = hasTools ? toolNudge(CONTINUE_PROMPT) : CONTINUE_PROMPT;
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=retry, cid=${convId}`);
     }
   }
@@ -964,6 +1071,16 @@ export async function handleChatCompletion(
         if (useToolAgent) noteAgentRouteAlive(tone); // the agent route answered on this account
         conv.servedModel = model;
         inputImages = []; // on the server now: a forcing retry in this conversation needn't resend them
+        if (promptLog) {
+          rawTurn += 1;
+          const suffix = String(rawTurn).padStart(2, "0");
+          writePromptLog(promptLog, `raw-${suffix}.txt`, fullText);
+          writePromptLog(promptLog, `raw-${suffix}.meta.json`, JSON.stringify({
+            model, tone, agent: useToolAgent, framing: framingVariant,
+            message_type: copilotStream.messageType ?? null,
+            turn_count: copilotStream.turnCount ?? null,
+          }, null, 2));
+        }
         return { fullText };
       }
 
@@ -1142,9 +1259,12 @@ export async function handleChatCompletion(
       if (!confab && !remoteArtifact && !halluc) break;
       const retryKind = remoteArtifact ? "Remote artifact completion" : confab ? "Confabulation" : "Hallucinated completion";
       log.info(`${retryKind} detected (no tool call) — forcing retry ${attempt + 1}/${maxConfabRetries}`);
-      text = remoteArtifact ? REMOTE_ARTIFACT_FORCE_PROMPT
+      const force = remoteArtifact ? REMOTE_ARTIFACT_FORCE_PROMPT
         : confab ? (everActed ? MIDTASK_FORCE_PROMPT : CONFAB_FORCE_PROMPT)
         : HALLUCINATION_FORCE_PROMPT;
+      // Without the tools block the model is right to refuse: "in this turn there
+      // is no <tools>". Re-expose the framing along with the force prompt.
+      text = toolNudge(force);
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;

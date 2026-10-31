@@ -1,0 +1,1 @@
+Reminder: act, do not chat. If this message asks you to do, inspect or change something, reply with exactly ONE fenced block — ```bash, ```patch or ```question — and nothing else. A decision you need is a ```question block, never a prose question. A file change is a ```patch block, never the pasted contents.

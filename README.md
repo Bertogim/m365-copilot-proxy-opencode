@@ -96,7 +96,7 @@ M365 Copilot doesn't support OpenAI-style `tool_calls` natively. Instead, tools 
 emulated via a **Markdown-fence format** (the JSON `{"tool":...}` format was removed —
 it scored 0/5 on real agentic tasks; see [hypotheses §9](docs/hypotheses.md)):
 
-- Tool definitions are injected into the prompt as fenced templates inside a `<tools>` block
+- Tool definitions are no longer injected as a `<tools>` block: the prompt tells the model to act with a fenced block, and our system prompt documents the `bash`/`patch`/`question` forms
 - The model emits a fenced tool call — a code block whose info-string is the tool name
   (scalar args as `key: value` header lines, one free-form body arg as the fence body,
   `old`/`new` edits as aider-style `SEARCH/REPLACE` diffs)
@@ -109,6 +109,28 @@ it scored 0/5 on real agentic tasks; see [hypotheses §9](docs/hypotheses.md)):
   is what turns 0/5 into real multi-turn loops (verified 9-tool-call bug fix).
 - **Reliability comes from the Copilot Studio agent (below) + the fenced/shell framing** —
   without the agent, M365 ignores tool instructions and answers in prose
+
+### System prompt
+
+OpenCode's own system prompt describes a native tool API (Code Mode, an `execute`
+tool, parallel calls), which contradicts the fenced emulation above and is what makes
+the model answer "there is no tool block in this turn". By default the proxy
+**drops every `system` and `developer` message the harness sends** and sends exactly
+one `system` message: the file, verbatim (full turns, context restores and nudges
+alike). Nothing from the harness survives — no date, no `<env>`, no AGENTS.md:
+
+```sh
+export M365_SYSTEM_PROMPT=1                 # packages/prompts/opencode-system.md from the repo
+export M365_SYSTEM_PROMPT=/path/to/file.md  # any file you want to edit
+export M365_SYSTEM_PROMPT=0                 # off: pass the harness prompt through
+```
+
+The prompt lives in [`packages/prompts/opencode-system.md`](packages/prompts/opencode-system.md) as
+plain Markdown: edit it and restart the proxy. The filter itself is
+`packages/proxy-lib/src/system-filter.ts` (`stripHarnessPrompt` / `applySystemPrompt`);
+`system-filter.opencode.test.ts` runs the real `opencode` binary against a fake proxy and
+asserts that only this file arrives. The installer's launcher points the variable at the
+repo file; the filter is on when the variable is unset.
 
 ### Agent mode
 
@@ -696,6 +718,9 @@ Three token scopes are acquired:
 | `M365_NO_INTERACTIVE` | Set to `1` to hard-disable any visible browser login, overriding the flag above. For systemd/CI hosts where a window must never open. |
 | `M365_INTERACTIVE_TIMEOUT_MS` | How long to wait for you to finish the interactive sign-in (default `600000`, i.e. 10 minutes). |
 | `M365_LOGIN_LOCALE` / `M365_LOGIN_TIMEZONE` | Browser locale and timezone presented during login (defaults `en-GB` / `Europe/Copenhagen`). These are part of the anti-bot-scoring fingerprint ([§11 F25](docs/hypotheses.md)) — set them to match your own machine if AAD starts treating your automated login as a bot. |
+| `M365_PROMPT_LOG_DIR` | Write each request's original `messages` (`*-original.json`), the exact prompt sent upstream (`*-turn-NN-converted.txt`) and each upstream reply's raw text plus model/tone/framing metadata (`*-raw-NN.txt`, `*-raw-NN.meta.json`). `iniciar-proxy.sh --logs` sets it to `~/m365-copilot-setup/logs`. |
+| `M365_LOCAL_TITLES` | Answer OpenCode's conversation-title request locally (first 5 words of the opener, `...` if longer) instead of spending an M365 turn on a fresh conversation. `0` sends it upstream. |
+| `M365_SYSTEM_PROMPT` | Replace the harness system prompt (default: on, using `packages/prompts/opencode-system.md`). Every `system`/`developer` message is dropped and this file is sent verbatim. A path uses that file; `0`/`off` leaves the harness prompt untouched. |
 | `M365_FORCE_AGENT` | Override which tool requests carry the Copilot Studio tool agent. `1` attaches it to every tool request (and turns off the GPT-6 Sol fallback below); `0` never attaches it. Unset, the proxy decides per model: GPT-5.x, `m365-copilot` and both Opus models take it, the other Claude models and `gpt-6-think-deeper` don't, and `gpt-6-sol` / `gpt-6.1-sol` take it only on a premium account, which the proxy learns from the first request. On a non-premium account `0` saves the probe turn (~3 s) per GPT-6 Sol model per proxy start. |
 | `M365_OPUS_FALLBACK_MODEL` | Model to serve `claude-opus` (Opus 5.5) requests with once its priority-access budget is used up, instead of returning a 429 — typically `claude-opus-4.8`, which isn't metered (premium accounts only). Applies until the budget resets; the response's `model` field names the model that answered. Unset by default. |
 | `M365_SONNET_FALLBACK_MODEL` | The same for `claude-sonnet-5.5` (Sonnet 5.5) once its priority-access budget is used up — e.g. `claude-sonnet-5` (unmetered) or `claude-sonnet` (Sonnet 4.6, any account). A fallback naming a metered model is ignored. Unset by default. |

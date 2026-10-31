@@ -33,6 +33,7 @@ export {
 } from "./auth-recovery.js";
 
 export { getOrCreateAgent, getEnvironmentUrl, environmentUrlFromName } from "./agent.js";
+export { readPromptFile } from "./prompt-file.js";
 
 export {
   decodeJwt,

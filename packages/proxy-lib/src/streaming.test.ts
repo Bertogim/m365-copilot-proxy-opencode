@@ -811,6 +811,8 @@ describe("follow-up turns and give-ups (Windows / pi, measured)", () => {
     const m2 = await ask(messages, pool);
     expect(scripted.texts).toHaveLength(3);
     expect(scripted.texts[2]).toContain("Your tools are working");
+    // The forcing retry must re-expose the tool-block vocabulary.
+    expect(scripted.texts[2]).toContain("```bash");
     expect(scripted.texts[2]).not.toContain("you have not run any command yet");
     expect(JSON.parse(m2.tool_calls[0].function.arguments).command).toBe("py -m pip install fpdf2");
     scripted.queue = [];
@@ -1834,10 +1836,10 @@ describe("RESENDTOOLS", () => {
       { role: "user", content: "RESENDTOOLS" },
     );
     const prompt = await post(pool, messages);
-    expect(prompt).toContain("ORIGINAL_TASK_MARKER");
+    expect(prompt).not.toContain("ORIGINAL_TASK_MARKER"); // no history replay
     expect(prompt).not.toContain("RESENDTOOLS");
-    expect(prompt).toContain("```bash"); // tool templates/framing re-sent
-    expect(prompt).not.toContain("BEGIN RECOVERED HISTORY");
+    expect(prompt).toContain("```bash"); // tool-block instructions re-sent
+    expect(prompt).toContain("```bash or ```patch");
     expect(scripted.newConversations).toBe(rotations); // same conversation
   });
 
@@ -1849,7 +1851,7 @@ describe("RESENDTOOLS", () => {
       const rotations = scripted.newConversations;
       messages.push({ role: "user", content: command });
       const prompt = await post(pool, messages);
-      expect(prompt).toContain("TASK_MARKER");
+      expect(prompt).not.toContain("TASK_MARKER");
       expect(prompt).toContain("```bash");
       expect(scripted.newConversations).toBe(rotations);
     }

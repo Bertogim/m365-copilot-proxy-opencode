@@ -5740,3 +5740,16 @@ it isn't"), and the framings no longer forbid asking the user to paste a file.
 that produced the capture. Falsifier: with the trim in place, `claude-sonnet` /
 `gpt-5.5` still give up on a tool task in a fresh opencode session, with no Code Mode text
 in the request.
+
+**Update (2026-10-31: option A shipped, now total).** Rather than trim,
+`M365_SYSTEM_PROMPT` drops **every** `system` and `developer` message and sends exactly
+one `system`: the file, verbatim (`applySystemPrompt()` in
+`packages/proxy-lib/src/system-filter.ts`), applied to full turns, context restores and
+the `RESENDTOOLS` nudge. The text lives in `packages/prompts/opencode-system.md` (plain
+Markdown, user-editable), seeded with the literal system message OpenCode v2.2.5 sent for
+`gpt-6.1-sol` in a captured request, so the contradiction can be deleted in place. On by
+default; a path = that file, `0`/`off` = pass the harness prompt through. This is A, not
+a section trim: date, `<env>`, AGENTS.md and skills are dropped too, by design.
+`system-filter.opencode.test.ts` drives the real `opencode` binary against a fake proxy
+(no M365 turn) and asserts the wire carries only the file. Live A/B still owed (n=0,
+throttled account); falsifier unchanged.

@@ -1,3 +1,4 @@
+import { readPromptFile } from "./prompt-file.js";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -52,35 +53,7 @@ function getAgentInstructions(): string {
   // (and thus re-provisioning) the agent each time. An earlier version that baked
   // heavy anti-advise framing into the agent SUPPRESSED tool emission (0 calls),
   // so this stays minimal and the behavioral lever lives where it's cheap to vary.
-  return `You are the execution core of an automated agent. Your output is parsed by a program.
-
-When the incoming message contains a <tools> block, you are in execution mode. To act, output ONLY a single Markdown code fence whose info-string is the tool name — nothing before or after. A fenced block is an ACTION the runtime executes immediately against a live system; it is never an example or illustration:
-\`\`\`<tool_name>
-<one "key: value" header line per scalar argument>
-
-<the body argument, if the tool defines one>
-\`\`\`
-The runtime returns the real result in a <tool_response> block — treat it as ground truth. Emit exactly one fenced tool call per turn, then stop and wait for the <tool_response>. The info-string and header keys must match the provided tool definitions exactly.
-
-Execution rules:
-- Execute instead of explaining.
-- Modify instead of describing modifications.
-- Verify instead of promising verification.
-- Retry instead of discussing failures.
-- Never summarize planned actions.
-- Never describe changes that have not been applied.
-- Never explain what you are about to do.
-- If a tool can advance the task, use a tool.
-
-After a tool failure:
-- Analyze the tool result.
-- Produce a corrected tool call.
-- Continue execution.
-- Prefer another tool call over natural-language discussion.
-
-A failed tool call is not task completion. Continue acting until the task succeeds or a real blocker is reached.
-
-When the message has no <tools> block, respond normally as a helpful assistant in natural language.`;
+  return readPromptFile("agent-instructions.md");
 }
 
 /**

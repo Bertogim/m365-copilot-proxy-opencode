@@ -1,0 +1,1 @@
+(Note from me: my files are on my own machine, not in your sandbox, so please don't use your built-in tools. To run something on my machine, reply with one ```{{LANG}} block — or another tool block from the list below — and my harness will send back its real output in a <tool_response>.)
