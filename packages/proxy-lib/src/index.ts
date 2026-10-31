@@ -25,33 +25,47 @@ export const HEALTH_PAYLOAD = { status: "ok" } as const;
 
 // Window/output hints surfaced to harnesses on /v1/models so they can size
 // context packing and output expectations. These are ADVERTISED hints only — M365
-// enforces its own limits server-side; the number here just stops harnesses from
-// pre-truncating our prompts/output. Empirically (docs/hypotheses.md F9) M365 accepts
-// ≥500k tokens of input (retrieval-backed); the old ~3k output hint made harnesses
-// cap generation far below what a coding turn needs. Advertise a roomy 1M window +
-// 1M output (in line with modern large-context models) so nothing client-side clips.
-// Override via env.
-const CONTEXT_WINDOW_TOKENS = Number(process.env.M365_CONTEXT_WINDOW) || 1_000_000;
-const MAX_OUTPUT_TOKENS = Number(process.env.M365_MAX_OUTPUT_TOKENS) || 1_000_000;
+// enforces its own limits server-side. Advertise each model's published window and
+// max output so harnesses neither pre-truncate our prompts/output nor compact early;
+// unknown tones fall back to the env defaults. Empirically (docs/hypotheses.md F9)
+// M365 accepts ≥500k tokens of input (retrieval-backed).
+const DEFAULT_CONTEXT_WINDOW_TOKENS = Number(process.env.M365_CONTEXT_WINDOW) || 1_000_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = Number(process.env.M365_MAX_OUTPUT_TOKENS) || 128_000;
+
+/** Published context window / max output of the model behind each tone. */
+const MODEL_LIMITS: ReadonlyArray<readonly [RegExp, number, number]> = [
+  [/^gpt-5\.2/, 400_000, 128_000],
+  [/^gpt-5\.3/, 128_000, 16_384],
+  [/^gpt-5\.[4-6]/, 1_050_000, 128_000],
+  [/^gpt-6/, 1_050_000, 128_000],
+  [/^claude/, 1_000_000, 128_000],
+];
+
+export function modelLimits(id: string): { context: number; output: number } {
+  for (const [pattern, context, output] of MODEL_LIMITS) {
+    if (pattern.test(id)) return { context, output };
+  }
+  return { context: DEFAULT_CONTEXT_WINDOW_TOKENS, output: DEFAULT_MAX_OUTPUT_TOKENS };
+}
 
 /** Build the OpenAI-compatible `GET /v1/models` payload. */
 export function buildModelsPayload() {
   const created = Math.floor(Date.now() / 1000);
   return {
     object: "list",
-    data: getAvailableModels().map((id) => ({
-      id,
-      object: "model",
-      created,
-      owned_by: "microsoft",
-      // Non-standard but widely-read by OpenAI-compatible harnesses. Several
-      // aliases because clients disagree on the key name. Unknown keys are
-      // ignored by strict clients.
-      context_window: CONTEXT_WINDOW_TOKENS,
-      max_context_length: CONTEXT_WINDOW_TOKENS,
-      max_input_tokens: CONTEXT_WINDOW_TOKENS,
-      max_output_tokens: MAX_OUTPUT_TOKENS,
-    })),
+    data: getAvailableModels().map((id) => {
+      const { context, output } = modelLimits(id);
+      return {
+        id,
+        object: "model",
+        created,
+        owned_by: "microsoft",
+        context_window: context,
+        max_context_length: context,
+        max_input_tokens: context,
+        max_output_tokens: output,
+      };
+    }),
   };
 }
 

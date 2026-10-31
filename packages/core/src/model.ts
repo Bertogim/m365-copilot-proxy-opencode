@@ -34,6 +34,7 @@ export class ModelSession {
   private useAgent: boolean;
   private temporaryChat: boolean;
   private copilotSession: CopilotSession | null = null;
+  private conversationTurnCount = 0;
   private cachedAgentId: string | null | undefined = undefined;
 
   /** Stable IDs reused across CopilotSession reconnections. */
@@ -48,8 +49,9 @@ export class ModelSession {
    * See docs §10 F22.
    */
   newConversation(): void {
-    this._conversationId = crypto.randomUUID();
     this.reset();
+    this._conversationId = crypto.randomUUID();
+    this.conversationTurnCount = 0;
   }
 
   constructor(options: ModelSessionOptions = {}) {
@@ -61,17 +63,19 @@ export class ModelSession {
 
   /** Number of turns completed in this session */
   get turnCount(): number {
-    return this.copilotSession?.turnCount ?? 0;
+    return Math.max(this.conversationTurnCount, this.copilotSession?.turnCount ?? 0);
   }
 
   /** Agent id baked into the current copilotSession (undefined = no agent). */
   private currentAgentId: string | undefined = undefined;
 
   private createCopilotSession(agentId: string | undefined): CopilotSession {
+    this.conversationTurnCount = this.turnCount;
     return new CopilotSession({
       agentId,
       sessionId: this.sessionId,
       conversationId: this.conversationId,
+      initialTurnCount: this.conversationTurnCount,
       temporaryChat: this.temporaryChat,
     });
   }
@@ -182,6 +186,7 @@ export class ModelSession {
       if (fresh !== this.cachedAgentId) {
         log.info(`Agent refreshed: ${this.cachedAgentId ?? "none"} -> ${fresh ?? "none"}`);
         this.cachedAgentId = fresh;
+        this.conversationTurnCount = this.turnCount;
         this.copilotSession = null; // reconnect so the new agent id takes effect
         this.currentAgentId = undefined;
         return true;
@@ -198,6 +203,7 @@ export class ModelSession {
    * re-resolves it (cheap cache fast-path in the normal case).
    */
   reset() {
+    this.conversationTurnCount = this.turnCount;
     this.copilotSession = null;
     this.cachedAgentId = undefined;
     this.currentAgentId = undefined;

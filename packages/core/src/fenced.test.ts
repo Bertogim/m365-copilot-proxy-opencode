@@ -1,6 +1,7 @@
 import { afterEach, describe, it, expect } from "vitest";
 import {
   deriveFencedSpec,
+  canonicalFenceName,
   renderFencedCall,
   parseFencedToolCalls,
   findFirstToolFence,
@@ -100,6 +101,75 @@ describe("deriveFencedSpec", () => {
   });
 });
 
+describe("canonical fence names (one vocabulary for M365)", () => {
+  const shellTool: ToolDef = {
+    type: "function",
+    function: {
+      name: "shell",
+      description: "Execute a shell command",
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    },
+  };
+  const applyPatch: ToolDef = {
+    type: "function",
+    function: {
+      name: "apply_patch",
+      description: "Apply a unified diff.",
+      parameters: { type: "object", properties: { patchText: { type: "string" } }, required: ["patchText"] },
+    },
+  };
+  const codeMode: ToolDef = {
+    type: "function",
+    function: {
+      name: "execute",
+      description: "Run JavaScript in a confined Code Mode runtime.",
+      parameters: { type: "object", properties: { code: { type: "string" } } },
+    },
+  };
+
+  it("renames the harness's tools to the role names the framing talks about", () => {
+    expect(canonicalFenceName(shellTool)).toBe("bash");
+    expect(canonicalFenceName(applyPatch)).toBe("patch");
+    expect(canonicalFenceName(editFile)).toBe("edit");
+    expect(canonicalFenceName(writeFile)).toBe("write");
+    expect(canonicalFenceName(readFile)).toBe("read_file"); // no conflicting role
+  });
+
+  it("leaves opencode's Code Mode `execute({code})` alone — it is not a shell", () => {
+    expect(canonicalFenceName(codeMode)).toBe("execute");
+  });
+
+  it("describes a renamed tool the proxy's way, not the harness's", () => {
+    const out = formatFencedToolDefinitions([shellTool, applyPatch], "baseline");
+    expect(out).toContain("```bash");
+    expect(out).toContain("```patch");
+    expect(out).not.toContain("Execute a shell command");
+    expect(out).not.toContain("Apply a unified diff.");
+  });
+
+  it("still parses the harness's own name, and the canonical alias emits the real tool", () => {
+    const map = buildSpecMap([shellTool, applyPatch]);
+    const byOldName = parseFencedToolCalls("```shell\nls -la\n```", map).calls;
+    expect(byOldName[0].function.name).toBe("shell");
+    const byAlias = parseFencedToolCalls("```bash\nls -la\n```", map).calls;
+    expect(byAlias[0].function.name).toBe("shell");
+    expect(JSON.parse(byAlias[0].function.arguments)).toEqual({ command: "ls -la" });
+
+    const patch = parseFencedToolCalls(
+      "```patch\n*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n```",
+      map,
+    ).calls;
+    expect(patch[0].function.name).toBe("apply_patch");
+    expect(JSON.parse(patch[0].function.arguments).patchText).toContain("*** Add File: a.txt");
+  });
+
+  it("round-trips a call written under a canonical fence through the transcript", () => {
+    const spec = deriveFencedSpec(writeFile);
+    expect(renderFencedCall(spec, { path: "a.py", content: "print(1)" })).toContain("```write");
+    expect(spec.name).toBe("write_file");
+  });
+});
+
 describe("renderFencedCall", () => {
   it("renders a body-only call with no header", () => {
     const out = renderFencedCall(deriveFencedSpec(bash), { command: "ls -la" });
@@ -108,12 +178,12 @@ describe("renderFencedCall", () => {
 
   it("renders header + body separated by a blank line", () => {
     const out = renderFencedCall(deriveFencedSpec(writeFile), { path: "a.py", content: "print(1)" });
-    expect(out).toBe("```write_file\npath: a.py\n\nprint(1)\n```");
+    expect(out).toBe("```write\npath: a.py\n\nprint(1)\n```");
   });
 
   it("renders an edit as SEARCH/REPLACE", () => {
     const out = renderFencedCall(deriveFencedSpec(editFile), { path: "a.py", old: "x", new: "y" });
-    expect(out).toBe("```edit_file\npath: a.py\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n```");
+    expect(out).toBe("```edit\npath: a.py\n<<<<<<< SEARCH\nx\n=======\ny\n>>>>>>> REPLACE\n```");
   });
 });
 
@@ -500,8 +570,10 @@ describe("hostPlatformNote", () => {
     expect(note).toContain("/mnt/data");
   });
 
-  it("names the harness's own shell tool rather than assuming `bash`", () => {
-    expect(hostPlatformNote(unlabelledShell, "win32")).toContain("`run_terminal_cmd`");
+  it("names the fence the model must write, not the harness's internal tool name", () => {
+    const note = hostPlatformNote(unlabelledShell, "win32");
+    expect(note).toContain("`bash`");
+    expect(note).not.toContain("`run_terminal_cmd`");
   });
 });
 
@@ -590,11 +662,65 @@ describe("formatFencedToolDefinitions", () => {
     const out = formatFencedToolDefinitions(ALL);
     expect(out).toContain("<tools>");
     expect(out).toContain("```bash");
-    expect(out).toContain("```write_file");
+    expect(out).toContain("```write");
     expect(out).toContain("<<<<<<< SEARCH");
     // Stresses the action-not-illustration contract
     expect(out).toContain("ACTION");
     expect(out).toContain("PRIMARY JOB");
+  });
+});
+
+describe("harness notes (integrated, no OpenCode plugin)", () => {
+  const applyPatch: ToolDef = {
+    type: "function",
+    function: {
+      name: "apply_patch",
+      description: "Apply a patch.",
+      parameters: { type: "object", properties: { patchText: { type: "string" } }, required: ["patchText"] },
+    },
+  };
+  const question: ToolDef = {
+    type: "function",
+    function: {
+      name: "question",
+      description: "Ask the user.",
+      parameters: { type: "object", properties: { questions: { type: "array" } }, required: ["questions"] },
+    },
+  };
+
+  it("says a shell is always there — no 'if available' hedge", () => {
+    const out = formatFencedToolDefinitions([bash, readFile], "baseline");
+    expect(out).toContain("There is always a real shell here (`bash`)");
+    expect(out).not.toContain("if a shell is available");
+  });
+
+  it("teaches the patch markers under the one canonical `patch` fence", () => {
+    const out = formatFencedToolDefinitions([bash, applyPatch], "relay_batch");
+    expect(out).toContain("`patch`");
+    expect(out).toContain("`patchText`");
+    expect(out).toContain("*** Begin Patch");
+    expect(out).toContain("*** End Patch");
+    expect(out).toContain("*** Update File:");
+  });
+
+  it("teaches the question array shape when the harness offers question", () => {
+    const out = formatFencedToolDefinitions([bash, question], "relay_batch");
+    expect(out).toContain("`question`");
+    expect(out).toContain("`questions` as an ARRAY");
+  });
+
+  it("never names a tool the request doesn't carry", () => {
+    const out = formatFencedToolDefinitions([readFile], "baseline");
+    expect(out).not.toContain("always a real shell");
+    expect(out).not.toContain("*** Begin Patch");
+    expect(out).not.toContain("`questions` as an ARRAY");
+  });
+
+  it("no longer forbids asking me to paste a file", () => {
+    for (const v of ["baseline", "minimal", "relay", "relay_batch", "negative", "terse"]) {
+      const out = formatFencedToolDefinitions([bash, readFile], v);
+      expect(out).not.toMatch(/paste (?:the )?(?:contents|files|anything)/i);
+    }
   });
 });
 

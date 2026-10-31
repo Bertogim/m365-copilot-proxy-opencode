@@ -25,9 +25,10 @@ import {
   couldBePriorityAccessPrefix,
   secondsUntilReset,
   type PriorityAccessExhaustion,
-  formatMessages,
+  formatMessages as formatCoreMessages,
   imageUrls,
   parseToolCalls,
+  buildSpecMap,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,
   looksLikeRemoteArtifactCompletion,
@@ -52,29 +53,171 @@ import type { z } from "zod/v4";
 
 const log = createLogger("handler");
 
-// Render generated images (§14) as markdown so any OpenAI-compatible client shows
-// them inline. The artifact URL 401s without the designerappservice token, so we
-// fetch the bytes ourselves and embed a self-contained data URI — a bare URL would
-// be useless to the client. On fetch failure we fall back to the raw URL so the
-// response is never silently empty.
+// Local conversation journal, enabled explicitly by the launcher.
+async function localChatEvent(cid: string, direction: string, model: string, payload: unknown) {
+  if (!process.env.M365_CHAT_DIR) return;
+  try {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    await fs.mkdir(process.env.M365_CHAT_DIR, { recursive: true, mode: 0o700 });
+    const filename = path.join(process.env.M365_CHAT_DIR,
+      cid.replace(/[^a-zA-Z0-9_-]/g, "_") + ".jsonl");
+    await fs.appendFile(filename,
+      JSON.stringify({ time: new Date().toISOString(), cid, direction, model, payload }) + "\n",
+      { mode: 0o600 });
+  } catch (error: any) {
+    log.info(`Local chat journal unavailable: ${error.message}`);
+  }
+}
+
+
+
+// Reserve a short filename atomically, without overwriting existing files.
+async function reserveImageFile(directory: string, extension: string) {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  for (let number = 1; number <= 1000000; number++) {
+    const filename = path.join(directory, `img${number}.${extension}`);
+    try {
+      const handle = await fs.open(filename, "wx", 0o600);
+      return { filename, handle };
+    } catch (error: any) {
+      if (error.code !== "EEXIST") throw error;
+    }
+  }
+  throw new Error("No available image filename could be found.");
+}
+
+// Save generated images on the proxy machine, never embed them in chat.
 async function renderImagesMarkdown(images: CapturedImage[]): Promise<string> {
   if (images.length === 0) return "";
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const os = await import("node:os");
+  const directory = path.join(os.homedir(), "Imágenes");
+  const results: string[] = [];
   let artifactToken: string | null = null;
-  try { artifactToken = await getImageArtifactToken(); } catch (e: any) { log.info(`image token failed: ${e.message}`); }
-  const parts: string[] = [];
-  for (const img of images) {
-    const url = img.referenceUrls[0];
-    if (!url) continue;
-    if (artifactToken) {
-      try {
-        const { data, contentType } = await fetchImageBytes(url, artifactToken);
-        parts.push(`![generated image](data:${contentType};base64,${data.toString("base64")})`);
-        continue;
-      } catch (e: any) { log.info(`image fetch failed: ${e.message}`); }
-    }
-    parts.push(`![generated image](${url})`);
+  try {
+    await fs.mkdir(directory, { recursive: true });
+    artifactToken = await getImageArtifactToken();
+    if (!artifactToken) throw new Error("Could not obtain the image download token.");
+  } catch (error: any) {
+    log.info(`Image storage preparation failed: ${error.message}`);
+    return "No image was saved: could not prepare the "
+      + "~/Pictures folder or authenticate the download. Do not claim that a file exists.";
   }
-  return parts.join("\n\n");
+  for (const image of images) {
+    const url = image.referenceUrls[0];
+    if (!url) {
+      results.push("An image could not be saved: its download reference is missing.");
+      continue;
+    }
+    try {
+      const { data } = await fetchImageBytes(url, artifactToken!);
+      const bytes = Buffer.from(data);
+      let extension: string;
+      if (bytes.length >= 24 &&
+          bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) {
+        extension = "png";
+      } else if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216 &&
+                 bytes[bytes.length - 2] === 255 && bytes[bytes.length - 1] === 217) {
+        extension = "jpg";
+      } else if (bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" &&
+                 bytes.toString("ascii", 8, 12) === "WEBP") {
+        extension = "webp";
+      } else {
+        throw new Error("The download does not have a recognized image signature.");
+      }
+      const { filename, handle } = await reserveImageFile(directory, extension);
+      let complete = false;
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+        complete = true;
+      } finally {
+        await handle.close();
+        if (!complete) await fs.unlink(filename).catch(() => {});
+      }
+      results.push(`Image saved on the proxy machine: ${filename}`);
+      log.info(`Image saved locally (${bytes.length} bytes)`);
+    } catch (error: any) {
+      log.info(`Image save failed: ${error.message}`);
+      results.push("An image could not be saved. Its contents and any remote link are not returned.");
+    }
+  }
+  return results.join("\n");
+}
+
+
+// Filter image payloads before exposing any response content to the client.
+async function sanitizeImagePayloads(text: string): Promise<string> {
+  if (!/data:image\/|iVBORw0KGgo|\/9j\/|UklGR/i.test(text)) return text;
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const os = await import("node:os");
+
+  const save = async (encoded: string): Promise<string> => {
+    try {
+      const compact = encoded.replace(/\s/g, "");
+      if (!compact || !/^[A-Za-z0-9+/]*={0,2}$/.test(compact) ||
+          compact.length % 4 === 1) throw new Error("Invalid base64");
+      const bytes = Buffer.from(compact, "base64");
+      if (bytes.toString("base64").replace(/=+$/, "") !== compact.replace(/=+$/, "")) {
+        throw new Error("Invalid encoding");
+      }
+      let extension = "";
+      const pngEnd = Buffer.from([0,0,0,0,73,69,78,68,174,66,96,130]);
+      if (bytes.length >= 45 &&
+          bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) &&
+          bytes.subarray(-12).equals(pngEnd)) {
+        extension = "png";
+      } else if (bytes.length >= 4 && bytes[0] === 255 && bytes[1] === 216 &&
+                 bytes[bytes.length - 2] === 255 && bytes[bytes.length - 1] === 217) {
+        extension = "jpg";
+      } else if (bytes.length >= 12 &&
+                 bytes.toString("ascii", 0, 4) === "RIFF" &&
+                 bytes.toString("ascii", 8, 12) === "WEBP" &&
+                 bytes.readUInt32LE(4) + 8 === bytes.length) {
+        extension = "webp";
+      } else {
+        throw new Error("Unrecognized or incomplete image");
+      }
+      const directory = path.join(os.homedir(), "Imágenes");
+      await fs.mkdir(directory, { recursive: true });
+      const { filename, handle } = await reserveImageFile(directory, extension);
+      let complete = false;
+      try {
+        await handle.writeFile(bytes);
+        await handle.sync();
+        complete = true;
+      } finally {
+        await handle.close();
+        if (!complete) await fs.unlink(filename).catch(() => {});
+      }
+      return `Image saved on the proxy machine: ${filename}`;
+    } catch {
+      return "[Image omitted: could not be saved; no file has been confirmed.]";
+    }
+  };
+
+  const patterns = [
+    /!\[[^\]\r\n]*\]\(\s*data:image\/[^;,\s)]+;base64,([A-Za-z0-9+/=\r\n\t ]+)\s*\)/gi,
+    /data:image\/[^;,\s"'<>)]*;base64,([A-Za-z0-9+/=\r\n]+)/gi,
+    /((?:iVBORw0KGgo|\/9j\/|UklGR)[A-Za-z0-9+/=]{512,})/g,
+  ];
+  for (const pattern of patterns) {
+    let output = "";
+    let position = 0;
+    for (const match of text.matchAll(pattern)) {
+      output += text.slice(position, match.index) + await save(match[1]);
+      position = match.index! + match[0].length;
+    }
+    text = output + text.slice(position);
+  }
+  return text.replace(
+    /data:image\/[^\s"'<>)]*/gi,
+    "[Contenido de imagen omitido: formato no recuperable]"
+  );
 }
 
 // Forcing follow-up sent (in the same conversation) when M365 confabulates an
@@ -141,11 +284,134 @@ const UNSTREAMED_BUDGET_WAIT_LIMIT_MS = 2 * 60_000;
 type ChatBody = z.infer<typeof ChatCompletionRequest>;
 type ParsedMessage = ChatBody["messages"][number];
 
+/** Standalone recovery commands: only the CURRENT user turn can trigger them. */
+const CONTEXT_RESTORE_COMMANDS = new Set(["RESTORECONTEXT", "RESTORESESSION"]);
+const TOOLS_RESTORE_COMMANDS = new Set(["RESENDTOOLS", "RESTORETOOLS", "SENDTOOLS"]);
+
+function restoreCommandOf(message: ParsedMessage): "context" | "tools" | null {
+  if (message.role !== "user") return null;
+  const command = getMessageContent(message).trim().toUpperCase();
+  if (CONTEXT_RESTORE_COMMANDS.has(command)) return "context";
+  if (TOOLS_RESTORE_COMMANDS.has(command)) return "tools";
+  return null;
+}
+
+function requestsContextRestore(messages: ParsedMessage[]): boolean {
+  const latest = messages.at(-1);
+  return latest !== undefined && restoreCommandOf(latest) === "context";
+}
+
+/** Re-send the tool block into the SAME upstream conversation (no rotation):
+ *  the user-facing equivalent of the automatic confabulation retry. */
+function requestsToolsRestore(messages: ParsedMessage[]): boolean {
+  const latest = messages.at(-1);
+  return latest !== undefined && restoreCommandOf(latest) === "tools";
+}
+
+/** The command is a control message, not part of the task: keep it out of the prompt. */
+function withoutRestoreCommand(messages: ParsedMessage[]): ParsedMessage[] {
+  return messages.filter(message => restoreCommandOf(message) === null);
+}
+
+/** Count actual transcript lines, not JSONL records or messages. */
+function restoredContextMessages(messages: ParsedMessage[], framingVariant?: string): ParsedMessage[] {
+  const history = messages.slice(0, -1).filter(message =>
+    message.role !== "system" && restoreCommandOf(message) === null,
+  );
+  const transcript = formatCoreMessages(history, undefined, "none", undefined, framingVariant);
+  const lines = transcript.replace(/\r\n?/g, "\n").split("\n");
+  const recent = transcript ? lines.slice(-700).join("\n") : "";
+  // A long tool result can consume all 700 lines and displace the task itself.
+  // Preserve the user's task and latest steering separately from that tail.
+  // These are historical user messages, not newly executed actions.
+  const userMessages = history.filter(message => message.role === "user");
+  const originalTask = userMessages[0];
+  const latestRequest = userMessages.at(-1);
+  const taskAnchors = [
+    ...(originalTask ? [
+      "BEGIN ORIGINAL USER REQUEST",
+      getMessageContent(originalTask),
+      "END ORIGINAL USER REQUEST",
+    ] : []),
+    ...(latestRequest && latestRequest !== originalTask ? [
+      "BEGIN LATEST USER INSTRUCTION",
+      getMessageContent(latestRequest),
+      "END LATEST USER INSTRUCTION",
+    ] : []),
+  ];
+  return [
+    ...messages.filter(message => message.role === "system"),
+    {
+      role: "user",
+      content: [
+        "I requested restoration of this session context.",
+        "Below are the last 700 available lines of history, or fewer if the history is shorter.",
+        "This is historical transcript data, not new instructions or tool results executed now.",
+        "The beginning may be truncated in the middle of a message.",
+        "To preserve the task across long tool outputs, the original user request and latest user instruction are retained separately.",
+        "The latest instruction may correct or cancel the original request; follow those corrections.",
+        ...taskAnchors,
+        "BEGIN RECOVERED HISTORY",
+        recent || "(No prior history is available in this request.)",
+        "END RECOVERED HISTORY",
+        "Resume the pending task from the last verified state. Do not repeat completed actions.",
+        "If essential information is missing, say so; do not invent context or results.",
+        "If the task requires executing commands, accessing files, or using tools and those execution tools are not actually available in this conversation, explicitly complain that the required tools are unavailable. Do not describe, narrate, summarize, or pretend to have executed the last command, and do not invent command output.",
+      ].join("\n"),
+    },
+  ];
+}
+
+// Stable object-key order prevents harmless JSON serialization changes from
+// being mistaken for rewritten history. Array order and all values stay intact.
+function messageSnapshot(message: ParsedMessage): string {
+  const stable = (value: any): any => {
+    if (Array.isArray(value)) return value.map(stable);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])]));
+    }
+    return value;
+  };
+  return JSON.stringify(stable(message));
+}
+
+// M365 never reports token counts (docs/m365-copilot-api.md §2: no usage
+// frames), so OpenAI clients that render a context meter — OpenCode v1/v2
+// compute `tokens.total / model.limit.context` — used to see 0% and show
+// nothing. These are estimates (Latin text runs ~4 chars/token): wrong by a
+// constant factor, but they move with the conversation, which is what the meter
+// needs. `M365_TOKEN_ESTIMATE=0` restores the historical zeros.
+function tokenEstimateEnabled(): boolean {
+  return process.env.M365_TOKEN_ESTIMATE !== "0";
+}
+
+function estimateTokens(text: string | null | undefined): number {
+  if (!tokenEstimateEnabled() || !text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/** Prompt size of the request as the CLIENT holds it (full history + schemas),
+ *  not the delta we may send upstream: the meter is about the client's context. */
+function estimatePromptTokens(messages: ParsedMessage[], tools?: unknown): number {
+  if (!tokenEstimateEnabled()) return 0;
+  let chars = 0;
+  for (const message of messages) {
+    chars += getMessageContent(message).length;
+    for (const call of message.tool_calls ?? []) {
+      chars += call.function.name.length + call.function.arguments.length;
+    }
+  }
+  if (tools) chars += JSON.stringify(tools).length;
+  return Math.max(1, Math.ceil(chars / 4));
+}
+
 // --- Per-conversation state ---
 
 interface ConversationState {
   session: ModelSession;
   sentMessageCount: number;
+  /** Exact serialized request prefix; counts alone cannot detect rewritten history. */
+  sentMessageSnapshot?: string[];
   lastAccessedAt: number;
   /** Sent ahead of the next tool result when the proxy executed less than the
    *  model wrote last turn (see executedOnlyFirstNote). */
@@ -221,10 +487,15 @@ export class SessionPool {
       // already created and verified" in an empty directory — and the pass rate
       // fell 7/10 → 4/10 → 3/10 over the sweep. The full prompt re-sends the
       // whole history, so nothing the harness holds is lost.
-      if (messages.length <= existing.sentMessageCount) {
-        log.info(`Conversation ${fingerprint}: not a continuation (${messages.length} <= ${existing.sentMessageCount} sent), starting a fresh M365 conversation`);
+      const historyChanged = existing.sentMessageSnapshot !== undefined &&
+        existing.sentMessageSnapshot.some(
+          (previous, index) => messageSnapshot(messages[index]) !== previous,
+        );
+      if (messages.length <= existing.sentMessageCount || historyChanged) {
+        log.info(`Conversation ${fingerprint}: history changed or request is not an append-only continuation; starting a fresh M365 conversation with full history`);
         existing.session.newConversation();
         existing.sentMessageCount = 0;
+        existing.sentMessageSnapshot = undefined;
         existing.pendingNote = null;
       }
       existing.lastAccessedAt = Date.now();
@@ -349,6 +620,22 @@ export async function handleChatCompletion(
 ): Promise<Response> {
   const conv = pool.resolve(body.messages, body.tools);
   const { session } = conv;
+  const restoreContext = requestsContextRestore(body.messages);
+  const restoreTools = !restoreContext && requestsToolsRestore(body.messages);
+  if (restoreContext) {
+    // Explicit recovery must not depend on the possibly degraded upstream
+    // thread. Keep the caller's local history, but replay into a fresh one.
+    session.newConversation();
+    conv.sentMessageCount = 0;
+    conv.sentMessageSnapshot = undefined;
+    conv.pendingNote = null;
+    conv.servedModel = undefined;
+    log.info("RESTORECONTEXT: starting a fresh upstream conversation and replaying available context");
+  } else if (restoreTools) {
+    // Same conversation, same context: only the tool block/framing is re-sent,
+    // exactly like the automatic confabulation retry does after a give-up.
+    log.info("RESENDTOOLS: re-sending the tool framing into the current upstream conversation");
+  }
   const hasTools = body.tools && body.tools.length > 0 && body.tool_choice !== "none";
   const requestedModel = body.model;
 
@@ -393,6 +680,29 @@ export async function handleChatCompletion(
   // claude-* string into GPT-tone + agent-suppressed — the confab quadrant we
   // observed. One resolved tone drives both.
   let tone = getToneForModel(model);
+  // Apply these workflow preferences to GPT-6 and Sol only, including
+  // full-history retries and the context refreshed on continued tool turns.
+  function formatMessages(...args: Parameters<typeof formatCoreMessages>): string {
+    // Keep the original request untouched for session fingerprints/snapshots.
+    // Apply the same replay on fresh-conversation and fallback retries too.
+    if (restoreContext && args[0] === body.messages) {
+      args[0] = restoredContextMessages(body.messages, args[4]);
+    }
+    const formatted = formatCoreMessages(...args);
+    if (!hasTools || ![
+      "Gpt_6_Reasoning",
+      "Gpt_6_Sol_Reasoning",
+      "Gpt_61_Sol_Reasoning",
+    ].includes(tone)) return formatted;
+    return formatted + "\n\n" + [
+      "My workflow preferences for this task:",
+      "Format clickable web links in user-facing responses as standard Markdown: [descriptive label](https://example.com/path). Do not write label (URL), wrap links in backticks, or emit HTML or terminal escape sequences. Keep sentence punctuation outside the Markdown link, preserve the exact destination URL, and do not invent URLs. These formatting rules apply to prose, not file contents, code examples, or tool arguments.",
+      "Use the available dedicated patch or editing tool for file changes instead of Python, sed, or shell rewrites whenever it can express the change. Use only tools actually listed in this request, and follow their declared input format. Shell scripts remain appropriate for commands, tests, and transformations that genuinely need them.",
+      "Do not create .bak, .backup, or timestamped backup copies by default, unless I ask for them or you are working on important changes where a backup provides meaningful recovery protection. Explain any backup you create in your final response. Preserve existing user changes and existing backups.",
+      "Keep shell output operational: commands, test results, diagnostics, and actionable errors. Do not use print, echo, or printf to deliver explanations, progress narration, completion claims, caveats, or next steps intended for me.",
+      "After the real tool results confirm completion, put the important information in your final plain-text response outside any tool block: what changed, verification results, limitations, pending work, and commit/push status when relevant. Do not hide this information in shell output or comments. The final response may use several concise sentences when needed; completeness matters more than the earlier one-sentence suggestion.",
+    ].join("\n");
+  }
   // Framing default follows the MODEL (defaultFramingForModel): the Claude,
   // GPT-6 and GPT-6 Sol tones get a user-voice relay (Sonnet reads the
   // `<system>`-tagged baseline as an injected prompt; on Opus it trips the
@@ -409,22 +719,32 @@ export async function handleChatCompletion(
   // so we only need to send new messages after the first turn.
   const isFirstTurn = session.turnCount === 0;
   const convId = session.conversationId;
+  await localChatEvent(convId, "ENTRA", model,
+    body.messages.slice(conv.sentMessageCount || 0).filter(m => m.role !== "system"));
   let text: string;
   // Images ride on the message that carries their text (core image-input.ts).
   let inputImages: string[];
-  if (isFirstTurn || conv.sentMessageCount === 0) {
-    text = formatMessages(body.messages, body.tools, body.tool_choice, convId, framingVariant);
+  if (restoreTools) {
+    // Full history minus the command, with the tool definitions and framing the
+    // harness sent on this request. No newConversation(): this is a nudge.
+    text = formatMessages(withoutRestoreCommand(body.messages), body.tools, body.tool_choice, convId, framingVariant);
     inputImages = imageUrls(body.messages);
+    log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=restore-tools, cid=${convId}`);
+  } else if (restoreContext || isFirstTurn || conv.sentMessageCount === 0) {
+    text = formatMessages(body.messages, body.tools, body.tool_choice, convId, framingVariant);
+    inputImages = restoreContext ? [] : imageUrls(body.messages);
     log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=full, cid=${convId}`);
   } else {
     const newMessages = body.messages.slice(conv.sentMessageCount);
     inputImages = imageUrls(newMessages);
     const delta = newMessages.length > 0 ? formatDeltaMessages(newMessages, body.messages) : "";
     if (delta.length > 0) {
+      // The upstream conversation retains its initial framing, tool schemas
+      // and workflow preferences. Send only new messages on continuations.
       text = delta;
       // Only a tool result is the thing the note corrects the model about.
       if (conv.pendingNote && newMessages.some((m) => m.role === "tool")) {
-        text = `${conv.pendingNote}\n\n${delta}`;
+        text = `${conv.pendingNote}\n\n${text}`;
         log.info("Prepended the only-the-first-call-ran note (last reply was partly executed)");
       }
       log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, new=${newMessages.length}, turn=${session.turnCount}, mode=delta, cid=${convId}`);
@@ -438,6 +758,7 @@ export async function handleChatCompletion(
 
   log.debug("Formatted prompt:", trunc(text, 1000));
 
+  const promptTokens = estimatePromptTokens(body.messages, body.tools);
   const completionId = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
 
@@ -454,6 +775,7 @@ export async function handleChatCompletion(
   let lastScores: Record<string, number> | null | undefined;
   let lastTurnCount: number | null | undefined;
   let lastMetering: Record<string, number> | null | undefined;
+  let lastCompletionTokens = 0;
 
   // `onDelta` (when provided) forwards each text delta to the caller AS IT ARRIVES,
   // for live incremental streaming. It's safe to forward without ever retracting:
@@ -542,13 +864,14 @@ export async function handleChatCompletion(
       // chat text — so an image turn looks empty to the checks below and would burn
       // a retry. Render the image(s) into the response instead, and (for streaming)
       // emit the markdown as a trailing delta so the client isn't left with nothing.
+      fullText = await sanitizeImagePayloads(fullText);
       const images = copilotStream.images ?? [];
       if (images.length > 0) {
         const imageMd = await renderImagesMarkdown(images);
         if (imageMd) {
           const addition = fullText.length > 0 ? `\n\n${imageMd}` : imageMd;
           fullText += addition;
-          onDelta?.(addition);   // stream the appended markdown (text deltas already sent)
+          // Image paths are included only in the final filtered response.
         }
       }
 
@@ -736,7 +1059,10 @@ export async function handleChatCompletion(
         }
         log.info(`Empty upstream response, quick retry in ${SHORT_RETRY_DELAY_MS / 1000}s (attempt ${attempt + 1}/${MAX_RETRIES})`);
         await new Promise(r => setTimeout(r, SHORT_RETRY_DELAY_MS));
-        text = "Please continue."; // M365 already has context
+        // An empty turn may not have consumed the request. Retry its actual
+        // prompt, including the task reference and command output, not a bare
+        // continuation that assumes the missing context exists upstream.
+        text = originalText;
       } else {
         // A model served only on a premium account, on a non-premium one (Opus
         // 4.8: BotConnection, `InternalError`, every time, with the agent and
@@ -771,7 +1097,7 @@ export async function handleChatCompletion(
   // `onDelta` streams text to the client live (non-tool path only — see produce's
   // caller). Tool mode ignores it: the raw text is parsed for tool-call fences and
   // can't be shown verbatim, so it stays fully buffered.
-  async function produce(onDelta?: (delta: string) => void): Promise<Produced> {
+  async function produceRaw(onDelta?: (delta: string) => void): Promise<Produced> {
   // When tools are present, buffer full response to detect tool calls
   if (hasTools) {
     // A <tool_response> the model wrote itself is a stop sequence: everything
@@ -785,9 +1111,10 @@ export async function handleChatCompletion(
       if (cutFabricated) log.info(`Model wrote its own <tool_response> — cut ${raw.length - cut.length} fabricated chars (stop sequence)`);
       return cut;
     };
-    const result = await runBuffered();
+    const result = await runBuffered(onDelta);
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length;
+    conv.sentMessageSnapshot = body.messages.map(messageSnapshot);
     let fullText = stopAtFabricatedResult(result.fullText);
 
     log.debug("Raw response (tool mode):", trunc(fullText, 1000));
@@ -821,8 +1148,14 @@ export async function handleChatCompletion(
       const retry = await runBuffered();
       if ("error" in retry) return { kind: "error", resp: retry.error };
       conv.sentMessageCount = body.messages.length;
+      conv.sentMessageSnapshot = body.messages.map(messageSnapshot);
       fullText = stopAtFabricatedResult(retry.fullText);
       ({ parsed, judged } = parseReply(fullText, body.tools));
+      if (confab && parsed.hasToolCalls) {
+        parsed.textContent = parsed.textContent
+          ? `TOOLS RESTORED\n\n${parsed.textContent}`
+          : "TOOLS RESTORED";
+      }
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
@@ -916,13 +1249,67 @@ export async function handleChatCompletion(
     const result = await runBuffered(onDelta);
     if ("error" in result) return { kind: "error", resp: result.error };
     conv.sentMessageCount = body.messages.length;
+    conv.sentMessageSnapshot = body.messages.map(messageSnapshot);
     return { kind: "text", text: result.fullText };
   }
-  } // end produce()
+
+  } // end produceRaw()
+
+  async function produce(onDelta?: (delta: string) => void): Promise<Produced> {
+    const result = await produceRaw(onDelta);
+    if (result.kind === "text") {
+      result.text = await sanitizeImagePayloads(result.text);
+    } else if (result.kind === "tools") {
+      const cleanValue = async (value: unknown): Promise<unknown> => {
+        if (typeof value === "string") return sanitizeImagePayloads(value);
+        if (Array.isArray(value)) return Promise.all(value.map(cleanValue));
+        if (value !== null && typeof value === "object") {
+          const entries = await Promise.all(Object.entries(value).map(
+            async ([key, item]) => [key, await cleanValue(item)] as const
+          ));
+          return Object.fromEntries(entries);
+        }
+        return value;
+      };
+      for (const call of result.toolCalls) {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(call.function.arguments);
+        } catch {
+          call.function.arguments = await sanitizeImagePayloads(call.function.arguments);
+          continue;
+        }
+        call.function.arguments = JSON.stringify(await cleanValue(parsed));
+      }
+    } else {
+      const content = await sanitizeImagePayloads(await result.resp.text());
+      const headers = new Headers(result.resp.headers);
+      headers.delete("content-length");
+      result.resp = new Response(content, {
+        status: result.resp.status,
+        statusText: result.resp.statusText,
+        headers,
+      });
+    }
+    lastCompletionTokens = result.kind === "text"
+      ? estimateTokens(result.text)
+      : result.kind === "tools"
+        ? result.toolCalls.reduce(
+            (sum, call) => sum + estimateTokens(call.function.name + call.function.arguments),
+            0,
+          )
+        : 0;
+    await localChatEvent(convId, "SALE", model,
+      result.kind === "error"
+        ? { status: result.resp.status, error: await result.resp.clone().text() }
+        : result);
+    return result;
+  }
+
 
   // --- Render: JSON (non-stream) or an early-flushed SSE stream (stream) ---
   const includeUsage = !!body.stream_options?.include_usage;
-  const usage = () => buildUsage(lastThrottle, lastContentOrigin, lastMessageType, lastScores, lastTurnCount, lastMetering);
+  const usage = () => buildUsage(lastThrottle, lastContentOrigin, lastMessageType, lastScores, lastTurnCount, lastMetering, { prompt: promptTokens, completion: lastCompletionTokens });
 
   if (!body.stream) {
     const p = await produce();
@@ -964,34 +1351,165 @@ export async function handleChatCompletion(
         try { send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: null }] }); } catch {}
       }, 15000);
 
-      // Live token passthrough (non-tool only). Track exactly what we've sent so the
-      // final render emits only the not-yet-streamed remainder. session.ts guarantees
-      // every forwarded delta extends the answer, so `sent` is always a prefix of the
-      // final text — the remainder is a clean tail, never a duplicate.
+      // Synthetic proxy status, NOT model reasoning. Keep it out of content
+      // and tool arguments. Clients without reasoning_content support ignore it.
+      // Preserve the waiting indicator on tool-capable turns too. Its
+      // reasoning segment ends at the first upstream output, before a
+      // recognised tool header starts native tool input.
+      //
+      // Shown for every model whose id doesn't say "think": the `*-think-deeper`
+      // reasoning models may stream thinking of their own, and stacking a
+      // fabricated "The model is thinking internally." on top of it muddles the
+      // two. `M365_WAIT_INDICATOR=0` turns it off everywhere.
+      const thinkingModel = /think/i.test(model) ||
+        (typeof requestedModel === "string" && /think/i.test(requestedModel));
+      const waitingEnabled = process.env.M365_WAIT_INDICATOR !== "0" && !thinkingModel;
+      let waitingTicks = 0;
+      let waitingElapsedTicks = 0;
+      let upstreamOutputStarted = false;
+      const waitingTimer = waitingEnabled ? setInterval(() => {
+        if (opts.signal?.aborted || upstreamOutputStarted || startedTool || sent.length > 0 || waitingTicks >= 120) return;
+        // Show Thinking only after two seconds of uninterrupted waiting.
+        // Fast responses go straight to prose/tool input without a flash.
+        // Once visible, keep adding one dot per second.
+        if (++waitingElapsedTicks < 2) return;
+        const status = waitingTicks++ === 0
+          ? "The model is thinking internally."
+          : ".";
+        try {
+          send({ ...base, choices: [{
+            index: 0, delta: { reasoning_content: status }, finish_reason: null,
+          }] });
+        } catch {}
+      }, 1000) : undefined;
+
+      // Stream only an irrevocably safe prose prefix. Keep potential image
+      // payloads, tool fences and fabricated results buffered for final parsing.
+      // A suffix holdback catches markers split across arbitrary deltas.
       let sent = "";
-      // Hold the head of the stream until it can't be a priority-access refusal
-      // (Opus quota, §15): those arrive as ordinary content, so forwarding them
-      // live would put the refusal in front of the client before the 429 that
-      // replaces it — delivering exactly the confusion the 429 prevents. The
-      // gate releases within ~45 chars, i.e. one short delta on a normal turn.
-      let head = "";
-      let gated = true;
-      const liveDelta = hasTools ? undefined : (delta: string) => {
-        if (!delta) return;
-        if (gated) {
-          head += delta;
-          if (couldBePriorityAccessPrefix(head)) return; // still undecided — keep buffering
-          gated = false;
-          delta = head; // release everything held so far, in order
+      let pending = "";
+      let blocked = false;
+      let startedTool: { id: string; name: string } | undefined;
+      const markers = ["data:" + "image/", "iVBORw0KGgo", "/9j/", "UklGR", "!["];
+      if (hasTools) markers.push("<tool_", "<invoke", "<function");
+      const toolFenceNames = hasTools ? [...buildSpecMap(body.tools ?? []).keys()] : [];
+      const streamEverActed = body.messages.some(
+        message => message.role === "assistant" &&
+          Array.isArray(message.tool_calls) && message.tool_calls.length > 0,
+      );
+      const liveDelta = (delta: string) => {
+        if (delta && !upstreamOutputStarted) {
+          upstreamOutputStarted = true;
+          if (waitingTimer !== undefined) clearInterval(waitingTimer);
+          // OpenAI-compatible clients end an open reasoning segment when
+          // tool_calls is present, including an empty array. Close the
+          // synthetic waiting segment as soon as upstream output starts,
+          // even while a split tool header is still being classified.
+          // This announces no tool and commits no executable arguments.
+          if (waitingTicks > 0) {
+            send({ ...base, choices: [{
+              index: 0, delta: { tool_calls: [] }, finish_reason: null,
+            }] });
+          }
         }
-        sent += delta;
-        try { send({ ...base, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] }); } catch {}
+        if (!delta || blocked) return;
+        pending += delta;
+        if (couldBePriorityAccessPrefix(pending)) return;
+        // Tool-mode retries may replace a refusal or a fabricated completion.
+        // Do not expose such a draft before the existing checks have judged it.
+        if (hasTools && (
+          looksLikeConfabulation(pending) ||
+          (!streamEverActed && looksLikeHallucinatedCompletion(pending)) ||
+          looksLikeRemoteArtifactCompletion(pending)
+        )) {
+          blocked = true;
+          return;
+        }
+        const lower = pending.toLowerCase();
+        let end = pending.length;
+        for (const marker of markers) {
+          const index = lower.indexOf(marker.toLowerCase());
+          if (index >= 0) end = Math.min(end, index);
+        }
+        // A normal code example is prose, not a tool call. Hold only an
+        // incomplete fence header or a header recognised by the tool parser.
+        // Re-evaluate incomplete headers on every delta instead of permanently
+        // blocking the stream at the first backticks.
+        if (hasTools) {
+          const fences = /```([A-Za-z0-9_.-]*)([ \t]*)(\r?\n|$)/g;
+          for (const match of pending.matchAll(fences)) {
+            const name = match[1];
+            const incomplete = match[3] === "";
+            if (!incomplete && name && toolFenceNames.includes(name)) {
+              end = Math.min(end, match.index!);
+              blocked = true;
+              // Start a real tool-input stream, not a synthetic status message.
+              // Announce opening command/editing fences through native tool
+              // input events. Arguments remain buffered and validated.
+              const spec = buildSpecMap(body.tools ?? []).get(name);
+              if (!startedTool && spec &&
+                  ["bash", "shell", "sh", "zsh", "run", "exec", "execute", "command", "cmd", "terminal", "run_command", "run_terminal_cmd", "execute_command", "execute_bash", "shell_exec", "system", "patch", "apply_patch", "edit", "write", "edit_file", "write_file"].includes(spec.name) &&
+                  pending.slice(0, match.index).trim() === "") {
+                startedTool = {
+                  id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+                  name: spec.name,
+                };
+                send({ ...base, choices: [{
+                  index: 0,
+                  delta: { tool_calls: [{
+                    index: 0, id: startedTool.id, type: "function",
+                    function: { name: startedTool.name, arguments: "" },
+                  }] },
+                  finish_reason: null,
+                }] });
+              }
+              break;
+            }
+            if (incomplete && toolFenceNames.some(tool => tool.startsWith(name))) {
+              end = Math.min(end, match.index!);
+            }
+          }
+          // The opening backticks themselves may span several deltas.
+          // Only hold when they look like a fence opener at start of line (not inline code).
+          const partialTicks = /(?:^|\r?\n)[ \t]*`{1,3}$/.exec(pending);
+          if (partialTicks) end = Math.min(end, partialTicks.index);
+        }
+        if (markers.some(marker => lower.includes(marker.toLowerCase()))) blocked = true;
+        // Delay tool-mode prose classification; never show a raw tool block.
+        if (hasTools && pending.length < 48 && !blocked) return;
+        if (!blocked) {
+          for (const marker of markers) {
+            for (let size = 1; size < marker.length; size++) {
+              if (lower.endsWith(marker.slice(0, size).toLowerCase())) {
+                end = Math.min(end, pending.length - size);
+              }
+            }
+          }
+          // Marker-prefix holdback above is sufficient; do not delay every
+          // ordinary token by a fixed 24-character tail.
+        }
+        if (end <= sent.length) return;
+        const content = pending.slice(sent.length, end);
+        sent += content;
+        try {
+          send({ ...base, choices: [{ index: 0, delta: { content }, finish_reason: null }] });
+        } catch {}
       };
 
       let p: Produced;
       try { p = await produce(liveDelta); }
       catch (err: any) { p = { kind: "error", resp: jsonResponse(502, { error: { message: err?.message ?? "stream error", type: "upstream_error" } }) }; }
+      // Never change a tool's identity after announcing it. A rewritten call
+      // or divergent final snapshot must fail rather than execute the wrong tool.
+      if (startedTool && p.kind !== "error" &&
+          (p.kind !== "tools" || p.toolCalls[0]?.function.name !== startedTool.name)) {
+        p = { kind: "error", resp: jsonResponse(502, { error: {
+          message: "The final response changed an announced tool call. No tool arguments were committed; retry the request.",
+          type: "tool_stream_mismatch",
+        } }) };
+      }
       clearInterval(hb);
+      if (waitingTimer !== undefined) clearInterval(waitingTimer);
       try {
         if (p.kind === "error") {
           let message = "upstream error";
@@ -1013,7 +1531,17 @@ export async function handleChatCompletion(
         } else if (p.kind === "tools") {
           p.toolCalls.forEach((tc, i) => {
             log.debug(`Tool call: ${tc.function.name} ${trunc(tc.function.arguments, 200)}`);
-            send({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: i, id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } }] }, finish_reason: null }] });
+            if (i === 0 && startedTool) {
+              send({ ...base, choices: [{
+                index: 0,
+                delta: { tool_calls: [{
+                  index: 0, function: { arguments: tc.function.arguments },
+                }] },
+                finish_reason: null,
+              }] });
+            } else {
+              send({ ...base, choices: [{ index: 0, delta: { tool_calls: [{ index: i, id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments } }] }, finish_reason: null }] });
+            }
           });
           send({ ...base, choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }], ...(includeUsage ? { usage: usage() } : {}) });
         } else {
@@ -1055,12 +1583,19 @@ function buildUsage(
   scores?: Record<string, number> | null,
   turnCount?: number | null,
   metering?: Record<string, number> | null,
+  tokens?: { prompt: number; completion: number },
 ): Record<string, unknown> {
+  // Estimated (see estimateTokens): M365 exposes no token counts, but OpenAI
+  // clients size their context meter from these fields. Zeroes made the meter
+  // useless; a local estimate tracks the conversation and is the best available.
+  const promptTokens = tokens?.prompt ?? 0;
+  const completionTokens = tokens?.completion ?? 0;
   const base: Record<string, unknown> = {
-    prompt_tokens: 0,
-    completion_tokens: 0,
-    total_tokens: 0,
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
   };
+  if (promptTokens > 0 || completionTokens > 0) base.x_m365_tokens_source = "estimated";
   if (throttle) {
     base.x_m365_conversation_messages = throttle.current;
     base.x_m365_conversation_max = throttle.max;
@@ -1129,7 +1664,11 @@ function priorityAccessResponse(exhaustion: PriorityAccessExhaustion, model: str
 
 function sseResponse(stream: ReadableStream): Response {
   return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
+    },
   });
 }
 

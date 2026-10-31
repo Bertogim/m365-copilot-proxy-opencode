@@ -1,0 +1,323 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "m365": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "M365 Copilot (own account)",
+      "options": {
+        "baseURL": "http://127.0.0.1:4141/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "m365-copilot": {
+          "name": "M365 Copilot",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "auto": {
+          "name": "M365: Auto",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "quick": {
+          "name": "M365: Quick",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "think-deeper": {
+          "name": "M365: Think Deeper",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude": {
+          "name": "M365: Claude (alias)",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-sonnet": {
+          "name": "M365: Claude Sonnet",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-sonnet-4.5": {
+          "name": "M365: Claude Sonnet 4.5 (alias)",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-sonnet-4.6": {
+          "name": "M365: Claude Sonnet 4.6 (alias)",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-sonnet-5.5": {
+          "name": "M365: Claude Sonnet 5.5",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-sonnet-5": {
+          "name": "M365: Claude Sonnet 5",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-sonnet-think-deeper": {
+          "name": "M365: Claude Reasoning",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-opus": {
+          "name": "M365: Claude Opus",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-opus-5": {
+          "name": "M365: Claude Opus 5 (alias)",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-opus-5.5": {
+          "name": "M365: Claude Opus 5.5 (alias)",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-opus-4.8": {
+          "name": "M365: Claude Opus 4.8",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "claude-opus-4.5": {
+          "name": "M365: Claude Opus 4.5 (alias)",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1000000,
+            "output": 128000
+          }
+        },
+        "gpt-5.5": {
+          "name": "M365: GPT-5.5",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.5-quick": {
+          "name": "M365: GPT-5.5 Quick",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.5-think-deeper": {
+          "name": "M365: GPT-5.5 Think Deeper",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.6": {
+          "name": "M365: GPT-5.6",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.6-quick": {
+          "name": "M365: GPT-5.6 Quick",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.6-think-deeper": {
+          "name": "M365: GPT-5.6 Think Deeper",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-6-think-deeper": {
+          "name": "M365: GPT-6 Think Deeper",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-6-sol": {
+          "name": "M365: GPT-6 Sol",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-6.1-sol": {
+          "name": "M365: GPT-6.1 Sol",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.4": {
+          "name": "M365: GPT-5.4",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.4-think-deeper": {
+          "name": "M365: GPT-5.4 Think Deeper",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.4-quick": {
+          "name": "M365: GPT-5.4 Quick",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 1050000,
+            "output": 128000
+          }
+        },
+        "gpt-5.3": {
+          "name": "M365: GPT-5.3",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 16384
+          }
+        },
+        "gpt-5.3-quick": {
+          "name": "M365: GPT-5.3 Quick",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 16384
+          }
+        },
+        "gpt-5.3-think-deeper": {
+          "name": "M365: GPT-5.3 Think Deeper",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 128000,
+            "output": 16384
+          }
+        },
+        "gpt-5.2": {
+          "name": "M365: GPT-5.2",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.2-quick": {
+          "name": "M365: GPT-5.2 Quick",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.2-think-deeper": {
+          "name": "M365: GPT-5.2 Think Deeper",
+          "tool_call": true,
+          "attachment": false,
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        }
+      }
+    }
+  },
+  "model": "m365/gpt-6.1-sol",
+  "small_model": "m365/gpt-6.1-sol"
+}

@@ -452,6 +452,10 @@ conversation at `1/600`). Characterised behaviour:
 
 - A "conversation" = a stable `ConversationId` (+ `X-SessionId`). M365 keeps **server-side context** for it.
 - Each **turn opens a fresh WebSocket** (with `invocationId:"0"`), but reuses the same `ConversationId`/`sessionId`, so the server threads them together. `isStartOfSession:true` only on turn 0.
+- The local attempted-turn counter survives transport-session recreation with
+  the same IDs (reconnect, agent refresh, or reset). Only `newConversation()`
+  clears it. This prevents recreation from marking a continuation as a first
+  turn; it does not prove that upstream retained the conversation.
 - **Send `X-RoutingParameter-SessionKey: <ConversationId>` as a header on every upgrade.** Without it the front end spreads a conversation's connections over backends in two regions (`x-calculatedbetarget` in the upgrade response names the one you got), which keep separate copies of the conversation: the turns fork, the server's `turnCount` steps back (1,2,3,2,4,…), and the model answers from a partial history. The query-string form does not pin. See hypotheses §32 F85 and `scripts/fork-probe.mjs`.
 - Because the server remembers prior turns, follow-ups should send **only the new messages** (the delta), not the whole history. Re-sending the full history confuses it and burns quota. See `ModelSession`/`CopilotSession` and `SessionPool` (`handler.ts`).
 - The proxy adds `disableMemory=1` to the Chathub URL **by default** — M365's temporary-chat control. Both halves are verified (§16 F28/F29, `scripts/temporary-chat-probe.mjs`): the live `ConversationId` still retains multi-turn context across turns, and the thread never appears in the Copilot history sidebar. Without it the proxy leaves one saved thread per prompt in the user's history. The trade is that a proxy conversation can't be recovered from the UI afterwards; `M365_SAVE_HISTORY=1` opts back into saved history.
@@ -524,6 +528,52 @@ Two traps for anyone else doing this:
 - opencode 1.18.18 ships **`apply_patch`** as its editing tool where other versions ship
   `edit`/`write`. A name-based allowlist that covers only one of those leaves the model
   unable to edit files at all, with only the shell to fall back on.
+
+**Implemented in the proxy (2026-10-28; prompt trimming reverted 2026-10-29).**
+`formatMessages` (`packages/core/src/tools.ts`) detects the harness itself, so nothing has to
+be configured in opencode and no plugin is needed:
+
+- Detection: a `system` message matching `running in OpenCode` or `# Code Mode`. pi and
+  other harnesses are untouched — the formatted request stays byte-identical.
+- System prompt: **passed through byte-for-byte.** Trimming it down to the user's
+  `Instructions from:` blocks + `<env>` was implemented, measured (system 8,782 → ~155
+  chars) and then reverted: the model needs the harness's own context, and deleting it left
+  the proxy responsible for describing every environment. The harness contract is fixed on
+  the *tool* layer instead (next bullet), not by editing the prompt.
+- Tools: an allowlist keeps
+  `shell, read, edit, write, grep, glob, webfetch, websearch, question, patch, apply_patch`
+  and drops `execute` (Code Mode), `skill` and `subagent`. The harness's own shell/write
+  tool is kept even under another name (`bash`, `run_command`, `create_file`). On the
+  captured turn the rendered request went 16,731 → 6,685 chars (−60%) with 12 → 8 tools.
+- One vocabulary: the surviving tools are presented under **canonical fence names**
+  (`canonicalFenceName()` in `fenced.ts`) — `shell`/`run_command` → ```bash,
+  `apply_patch`/`patch`(`patchText`) → ```patch, an old/new pair → ```edit, path+content →
+  ```write — with the proxy's one-line description. The framing, the `<tools>` block and
+  the transcript therefore name each action one way; the emitted `tool_call` keeps the
+  harness's real name.
+- Knob: `M365_OPENCODE_TOOLS=shell,read,…` replaces the allowlist. Only the *rendered*
+  request is adapted — parsing and the `tool_calls` returned to the client still use the
+  original `body.tools`, and a fence written under a tool's own name still maps back.
+
+**The OpenCode plugin is gone (2026-10-29).** `plugins/opencode/m365-sol-prompt.mjs` used to
+append a second system message to every `m365` turn with the `apply_patch` and `question`
+instructions. That only worked inside OpenCode and competed with the framing. Those notes
+now live in `harnessNotes()` (`packages/core/src/fenced.ts`), rendered next to the tool
+schemas in **every** framing variant, and only when the matching tool is actually offered:
+
+- a real shell is **always** there — no "if a shell is available" hedge, which the model
+  read as "maybe it isn't" and answered with prose;
+- `apply_patch` / `patch`: the user applies the patch, so the text starts with
+  `*** Begin Patch`, ends with `*** End Patch`, uses `*** Update File:` / `*** Add File:` /
+  `*** Delete File:` sections and no `---`/`+++` git-diff headers;
+- `question`: the `questions` array shape (`question`, `header` ≤ 30 chars, `options`,
+  `multiple`) and wait for the real result.
+
+Why it matters beyond prompt size: OpenCode's `# Code Mode` tells the model that tools
+"cannot be called directly" and must go through `execute`. That is false under this
+proxy's fenced emulation, and it is the one instruction a model trusts over the
+per-request framing — which is why weaker models answered "I can't run commands from
+here" while GPT-6/6.1 out-argued it. Removing the section removes the contradiction.
 
 ---
 

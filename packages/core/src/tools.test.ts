@@ -350,6 +350,31 @@ describe("looksLikeConfabulation", () => {
     expect(looksLikeConfabulation("`pandoc` sistemde kurulu olmadığı için PDF oluşturma komutu başarısız oldu. Bu oturumda yeni araç kurma veya indirilebilir PDF oluşturma yetkim bulunmuyor.")).toBe(true);
   });
 
+  it("flags Spanish give-ups (the model answers in the user's language)", () => {
+    // Exact live reply (2026-10-28) that reached the user as if it were a normal
+    // chat: no forcing retry fired because every pattern was English/Turkish.
+    expect(looksLikeConfabulation("Puedo ponerte comandos para seguir investigando, pero no puedo ejecutarlos yo desde aquí.")).toBe(true);
+    expect(looksLikeConfabulation("No puedo revisar el estado del repositorio desde aquí.")).toBe(true);
+    expect(looksLikeConfabulation("No puedo acceder a los archivos de tu proyecto desde este chat.")).toBe(true);
+    expect(looksLikeConfabulation("Lo siento, no tengo acceso al sistema de archivos de tu equipo.")).toBe(true);
+    expect(looksLikeConfabulation("No dispongo de herramientas para ejecutar comandos en esta sesión.")).toBe(true);
+    expect(looksLikeConfabulation("Como asistente de IA no puedo leer archivos en tu equipo; pégame el contenido de config.json.")).toBe(true);
+    expect(looksLikeConfabulation("Abre una terminal y ejecuta el siguiente comando; luego compárteme el resultado.")).toBe(true);
+    expect(looksLikeConfabulation("No puedo modificar el archivo: esta sesión no tiene acceso al disco.")).toBe(true);
+    expect(looksLikeConfabulation("El comando no devuelve ninguna salida, así que no hay nada que revisar.")).toBe(true);
+    expect(looksLikeConfabulation("Ejecuta estos comandos en tu terminal y pégame la salida.")).toBe(true);
+    expect(looksLikeConfabulation("La herramienta de edición no está disponible en esta conversación.")).toBe(true);
+  });
+
+  it("does NOT flag a Spanish project summary that only describes the setup", () => {
+    expect(looksLikeConfabulation("El proxy envía las peticiones a M365 y no devuelve imágenes en base64.")).toBe(false);
+    expect(looksLikeConfabulation("La sesión usa MSAL y las herramientas de edición están disponibles.")).toBe(false);
+    expect(looksLikeConfabulation("Puedo darte un resumen de los cambios realizados.")).toBe(false);
+    expect(looksLikeConfabulation("Para arrancar el proxy ejecuta iniciar-proxy.sh.")).toBe(false);
+    expect(looksLikeConfabulation("El archivo de configuración está vacío.")).toBe(false);
+    expect(looksLikeConfabulation("No hay nada que ocultar en el registro.")).toBe(false);
+  });
+
   it("does NOT flag a Turkish project summary that merely talks about sessions or disabled flags", () => {
     // This repo's own vocabulary — a summary of it must not read as a give-up.
     expect(looksLikeConfabulation("Kimlik doğrulama ve oturum yönetimi MSAL ile yapılır.")).toBe(false);
@@ -496,7 +521,7 @@ describe("fenced tool format (the only format)", () => {
       ],
       tools,
     );
-    expect(out).toContain("```write_file");
+    expect(out).toContain("```write");
     expect(out).toContain("path: a.py");
     expect(out).not.toContain('{"tool":');
   });
@@ -676,6 +701,147 @@ describe("transcript style (which tags wrap the framing and harness system promp
     const { formatToolDefinitions } = await import("./tools.js");
     for (const v of ["honest", "terse_user", "relay", "relay_batch"]) {
       expect(formatToolDefinitions(tools, v)).toMatch(/sandbox/);
+    }
+  });
+});
+
+describe("OpenCode harness adaptation", () => {
+  const openCodeSystem = `You are an AI agent running in OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available.
+
+# Harness
+- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do what you need.
+
+# Code Mode
+
+Use the \`execute\` tool to call the tools listed below. They cannot be called directly.
+
+## Available tools
+
+- opencode (8 tools)
+  - tools.opencode.models({ query?: string }): Promise<{ total: number }>
+
+Skills provide specialized instructions and workflows for specific tasks.
+Use the skill tool to load a skill when a task matches its description.
+<available_skills>
+  <skill>
+    <id>opencode</id>
+    <description>Use this for anything about OpenCode.</description>
+  </skill>
+</available_skills>
+
+Instructions from: /project/AGENTS.md
+# AGENTS.md
+
+Responde en español y usa shell para todo.
+
+Today's date: Wed Oct 28 2026
+
+Here is some useful information about the environment you are running in:
+<env>
+  Working directory: /project
+  Platform: linux
+</env>
+When you create a worktree outside the current working directory, consider using \`execute\` to call \`tools.opencode.session_move\`.`;
+
+  const tool = (name: string, props: Record<string, { type: string }>, description = ""): ToolDef => ({
+    type: "function",
+    function: { name, description, parameters: { type: "object", properties: props, required: [] } },
+  });
+
+  const openCodeTools: ToolDef[] = [
+    tool("edit", { path: { type: "string" }, oldString: { type: "string" }, newString: { type: "string" } }),
+    tool("glob", { pattern: { type: "string" }, path: { type: "string" } }),
+    tool("grep", { pattern: { type: "string" }, path: { type: "string" } }),
+    tool("question", { questions: { type: "array" } }),
+    tool("read", { path: { type: "string" } }),
+    tool("shell", { command: { type: "string" } }, "Execute a shell command"),
+    tool("skill", { id: { type: "string" } }),
+    tool("write", { path: { type: "string" }, content: { type: "string" } }),
+    tool("execute", { code: { type: "string" } }, "Run JavaScript in a confined Code Mode runtime."),
+  ];
+
+  it("adapts the tools even without an OpenCode system prompt", async () => {
+    const { formatMessages } = await import("./tools.js");
+    // This fork serves OpenCode only: no detection, no pi compatibility path.
+    const out = formatMessages(
+      [{ role: "system", content: "minimal prompt" }, { role: "user", content: "hola" }],
+      openCodeTools,
+      undefined,
+      "cid",
+      "baseline",
+    );
+    expect(out).not.toContain("```execute");
+    expect(out).not.toContain("Run JavaScript");
+    expect(out).toContain("```bash");
+  });
+
+  it("keeps the harness's own prompt — only the tool layer is adapted", async () => {
+    const { formatMessages } = await import("./tools.js");
+    // Prompt trimming was tried and reverted: the model needs the harness's own
+    // context, so the prompt passes through byte-for-byte and the proxy adapts the
+    // TOOL layer (canonical fences) instead.
+    const out = formatMessages(
+      [{ role: "system", content: openCodeSystem }, { role: "user", content: "hola" }],
+      openCodeTools,
+      undefined,
+      "cid",
+      "baseline",
+    );
+    expect(out).toContain(openCodeSystem);
+  });
+
+  it("trims the offered tools to the ones that can drive a coding loop", async () => {
+    const { adaptOpenCodeTools } = await import("./tools.js");
+    const names = adaptOpenCodeTools(openCodeTools).map((t) => t.function.name);
+    for (const keep of ["shell", "read", "edit", "write", "grep", "glob", "question"]) {
+      expect(names).toContain(keep);
+    }
+    for (const drop of ["execute", "skill"]) {
+      expect(names).not.toContain(drop);
+    }
+  });
+
+  it("keeps the harness shell and write tool even when named differently", async () => {
+    const { adaptOpenCodeTools } = await import("./tools.js");
+    const bespoke = [
+      tool("run_command", { command: { type: "string" } }, "Run a command"),
+      tool("create_file", { file_path: { type: "string" }, content: { type: "string" } }),
+    ];
+    const names = adaptOpenCodeTools(bespoke).map((t) => t.function.name);
+    expect(names).toContain("run_command");
+    expect(names).toContain("create_file");
+  });
+
+  it("presents the harness's tools under the canonical fences", async () => {
+    const { formatMessages } = await import("./tools.js");
+    const user = { role: "user", content: "lista los archivos" };
+
+    const oc = formatMessages(
+      [{ role: "system", content: openCodeSystem }, user],
+      openCodeTools,
+      undefined,
+      "cid",
+      "baseline",
+    );
+    // One vocabulary: the harness's `shell`/`edit`/`write` are shown as the fences
+    // the framing talks about, in the prompt AND in the <tools> block.
+    expect(oc).toContain("```bash");
+    expect(oc).toContain("```edit");
+    expect(oc).toContain("```write");
+    expect(oc).not.toContain("```shell");
+    expect(oc).not.toContain("```execute"); // Code Mode tool, dropped
+    expect(oc).not.toContain("Run JavaScript");
+    expect(oc).toContain("Instructions from: /project/AGENTS.md"); // harness prompt kept
+    expect(oc).toContain("<user>\nlista los archivos\n</user>");
+  });
+
+  it("honours M365_OPENCODE_TOOLS", async () => {
+    const { adaptOpenCodeTools } = await import("./tools.js");
+    process.env.M365_OPENCODE_TOOLS = "shell,read";
+    try {
+      expect(adaptOpenCodeTools(openCodeTools).map((t) => t.function.name)).toEqual(["read", "shell", "write"]);
+    } finally {
+      delete process.env.M365_OPENCODE_TOOLS;
     }
   });
 });

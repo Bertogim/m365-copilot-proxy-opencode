@@ -4,6 +4,8 @@ import {
   currentFramingVariant,
   deriveFencedSpec,
   findFirstToolFence,
+  findShellTool,
+  findWriteTool,
   formatFencedToolDefinitions,
   parseFencedToolCalls,
   renderFencedCall,
@@ -182,6 +184,47 @@ function maybeInjectReplyTool(tools: ToolDef[]): ToolDef[] {
   return [replyTool, ...tools];
 }
 
+// --- Harness adaptation -------------------------------------------------------
+
+// This fork serves OpenCode only, so its toolset is adapted unconditionally —
+// no system-prompt sniffing. OpenCode describes "Code Mode" (every tool reached
+// through `execute`) in its prompt, but the proxy emulates calls with fences, so
+// the TOOL layer is adapted instead of the harness's prompt. Prompt trimming was
+// tried and reverted: the model needs the harness's context. See
+// docs/m365-copilot-api.md §9, "Trimming a heavy harness: opencode".
+//
+// Allowlist of tools worth keeping for a coding loop. Everything else OpenCode
+// offers (`execute`, `skill`, `subagent`) belongs to Code Mode or costs prompt
+// weight without moving a coding task. `question` and `patch` are kept on
+// purpose: the proxy's notes tell the model how to use them.
+// Override with M365_OPENCODE_TOOLS=shell,read,...
+const OPENCODE_DEFAULT_TOOLS = "shell,read,edit,write,grep,glob,webfetch,websearch,question,patch,apply_patch";
+
+/** Adapt the harness's toolset to the fenced contract: keep the allowlist of
+ *  tools that can actually run a coding loop, plus the harness's shell/write tool
+ *  when it named them differently. Every tool that survives is presented to M365
+ *  under its canonical fence name (`shell` → ```bash, `apply_patch` → ```patch …,
+ *  see canonicalFenceName in fenced.ts). Parsing still uses the caller's original
+ *  `tools`, so a tool outside the list still maps back. */
+export function adaptOpenCodeTools(tools: ToolDef[]): ToolDef[] {
+  const allow = new Set(
+    (process.env.M365_OPENCODE_TOOLS ?? OPENCODE_DEFAULT_TOOLS)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  const kept = tools.filter((t) => allow.has(t.function.name));
+  const shell = findShellTool(tools);
+  if (shell && !kept.some((t) => t.function.name === shell.function.name)) {
+    kept.unshift(shell);
+  }
+  const write = findWriteTool(tools);
+  if (write && !kept.some((t) => t.function.name === write.function.name)) {
+    kept.push(write);
+  }
+  return kept.length > 0 ? kept : tools;
+}
+
 export function formatMessages(
   messages: Message[],
   tools?: ToolDef[],
@@ -191,11 +234,15 @@ export function formatMessages(
 ): string {
   const parts: string[] = [];
 
+  // The harness's own prompt goes to M365 untouched; only its toolset is adapted.
+  const shapedTools = tools ? adaptOpenCodeTools(tools) : tools;
+  const shapedMessages = messages;
+
   if (conversationId) {
     parts.push(`<conversation_id>${conversationId}</conversation_id>`);
   }
 
-  const effectiveTools = tools ? maybeInjectReplyTool(tools) : tools;
+  const effectiveTools = shapedTools ? maybeInjectReplyTool(shapedTools) : shapedTools;
   const specMap = effectiveTools ? buildSpecMap(effectiveTools) : null;
   // The wrapper tags follow the framing variant: most keep the historical
   // `<system>` tags, but Claude Sonnet reads a `<system>` block inside a user
@@ -207,7 +254,7 @@ export function formatMessages(
     parts.push(style.framingTag ? `<${style.framingTag}>\n${framing}\n</${style.framingTag}>` : framing);
   }
 
-  for (const m of messages) {
+  for (const m of shapedMessages) {
     if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
       const calls = m.tool_calls.map((tc) => {
         const rawArgs = tc.function.arguments;
@@ -235,7 +282,7 @@ export function formatMessages(
       const content = getMessageContent(m);
       parts.push(`<assistant>${content ? "\n" + content : ""}\n${calls}\n</assistant>`);
     } else if (m.role === "tool") {
-      parts.push(formatToolResponse(m, messages));
+      parts.push(formatToolResponse(m, shapedMessages));
     } else if (m.role === "system") {
       parts.push(`<${style.systemTag}>\n${getMessageContent(m)}\n</${style.systemTag}>`);
     } else {
@@ -321,6 +368,32 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /araç\s+çağrısı\s+yapama/i,
   /(?:dosya|araç)\s+erişimi\s+(?:olan|etkin)(?:[^.\n]|\.(?=\S)){0,40}oturum/i,                      // "dosya erişimi etkin bir kodlama oturumunda yeniden çalıştırın"
   /kopyala(?:[^.\n]|\.(?=\S)){0,80}kayde[dt]/i,                                                   // "kopyalayıp ozet.md olarak kaydedebilirsin" — hands the write back (kaydet → kayded- before a vowel) (kaydet/kayded-: consonant softening)
+  // Spanish. Same failure as Turkish: the model answers in the user's language,
+  // so an English-only list let every Spanish give-up reach the user untouched
+  // ("Puedo ponerte comandos para seguir investigando, pero no puedo
+  // ejecutarlos yo desde aquí", live 2026-10-28; no forcing retry fired, so the
+  // agent looked like a plain chat that asks the user to run the commands).
+  // Kept first-person or session-scoped and anchored on acting on files,
+  // commands or the environment, so a Spanish project summary does not read as
+  // a give-up. No trailing \b on the verbs: "ejecutarlos"/"leerlo" carry an
+  // enclitic pronoun. `ver` keeps a boundary so "verde"/"versión" don't match.
+  /\bno\s+(?:puedo|podr[eé]|soy\s+capaz\s+de|me\s+es\s+posible)\s+(?:[a-záéíóúñ]+\s+){0,2}(?:ejecutar|correr|lanzar|acceder|leer|escribir|crear|modificar|editar|guardar|listar|abrir|inspeccionar|obtener|descargar|instalar|interactuar|usar|ver(?:l[oa]s?)?\b)/i,
+  /\bno\s+puedo[\s\S]{0,80}\bdesde\s+aqu[ií]/i,                                                 // "no puedo ejecutarlos yo desde aquí"
+  /\b(?:no\s+tengo|no\s+dispongo\s+de|carezco\s+de)\s+(?:acceso|permiso|capacidad|posibilidad|habilidad|herramientas?)\b/i,
+  /\bsin\s+acceso\s+(?:a|al|a\s+la|a\s+los|a\s+las)\b/i,
+  /\b(?:puedo|podr[ií]a|te\s+puedo)\s+(?:darte|ponerte|pasarte|proporcionarte|ofrecerte|prepararte|dejarte)\s+(?:los\s+|unas?\s+)?(?:comandos?|scripts?|instrucciones|pasos)\b/i,
+  /\b(?:te\s+)?(?:doy|dejo|paso|pongo)\s+(?:los\s+|unas?\s+)?comandos?\b/i,
+  /\b(?:pégame|pega(?:me)?|proporcióname|proporciona(?:me)?|facilítame|compárteme|comparte|envíame|mándame)\b[^.\n]{0,80}\b(?:contenido|archivos?|código|resultados?|salida|texto|comandos?)\b/i,
+  /\b(?:abre|usa)\s+(?:una\s+)?(?:terminal|consola|símbolo\s+del\s+sistema)\b[^.\n]{0,120}\b(?:ejecuta|escribe|pega|introduce|corre)\b/i,
+  /\b(?:ejecuta|corre|lanza)\s+(?:tú\s+)?(?:este|estos|esto|el\s+siguiente|los\s+siguientes)\b/i,
+  /\bno\s+(?:devuelve|devuelven|arroja|arrojan|genera|generan)\s+(?:ninguna\s+|ningún\s+)?(?:salida|resultados?|contenido|datos)\b/i,
+  /\b(?:ninguna|ningún)\s+(?:salida|resultado|contenido)\s+(?:fue|ha\s+sido|se\s+ha)\s+(?:devuelto|proporcionado|recibido)\b/i,
+  /\b(?:el|la)\s+(?:archivo|carpeta|directorio)\s+(?:parece|se\s+ve)\s+(?:estar\s+)?vac[ií]a?\b/i,
+  /\bno\s+hay\s+nada\s+que\s+(?:simplificar|corregir|hacer|cambiar|mostrar|leer|revisar|arreglar)\b/i,
+  /\b(?:esta|la)\s+(?:sesión|conversación|ventana)\s+no\s+(?:tiene|dispone\s+de)\s+acceso\b/i,
+  /\b(?:este|el)\s+(?:chat|asistente|modelo)\s+no\s+(?:puede|tiene)\b[^.\n]{0,60}\b(?:archivos?|comandos?|sistema\s+de\s+archivos|herramientas?)\b/i,
+  /\bcomo\s+(?:modelo\s+de\s+lenguaje|asistente(?:\s+de\s+IA)?|IA)\s+no\s+puedo\b/i,
+  /\bherramientas?\s+(?:de|para)\s+(?:editar|edici[oó]n|ejecuci[oó]n|archivos?)[^.\n]{0,60}\bno\s+(?:está|están|se\s+encuentra|se\s+encuentran)\s+disponibles?\b/i
 ];
 
 // M365 sometimes creates a real patch in its Teams-hosted remote artifact

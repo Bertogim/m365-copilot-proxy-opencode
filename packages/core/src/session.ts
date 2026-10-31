@@ -248,6 +248,8 @@ export interface CopilotSessionOptions {
   sessionId?: string;
   /** Reuse an existing conversation ID so M365 finds the same server-side conversation. */
   conversationId?: string;
+  /** Preserve conversation progress when recreating the transport session. */
+  initialTurnCount?: number;
   /**
    * Ask M365 for a temporary chat by adding `disableMemory=1` to the Chathub URL.
    * Temporary chats retain context for their live ConversationId but are not
@@ -310,6 +312,7 @@ export class CopilotSession {
   constructor(options?: CopilotSessionOptions) {
     this.sessionId = options?.sessionId ?? crypto.randomUUID();
     this.conversationId = options?.conversationId ?? crypto.randomUUID();
+    this._turnCount = options?.initialTurnCount ?? 0;
     this.agentId = options?.agentId;
     this.nativeActions = options?.nativeActions;
     this.temporaryChat = options?.temporaryChat ?? true;

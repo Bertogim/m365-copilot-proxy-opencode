@@ -9,6 +9,7 @@ secrets.json
 .env
 result
 result-*
+session-*
 debug.log
 scripts/studio-dig-out/
 scripts/frame-dump-out/

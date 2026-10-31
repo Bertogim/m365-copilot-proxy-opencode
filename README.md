@@ -1,15 +1,94 @@
-# m365-copilot-proxy
+# m365-copilot-proxy-opencode
 
-Use Microsoft 365 Copilot as an LLM backend for OpenAI-compatible coding agents like [pi](https://pi.dev/) and [OpenClaw](https://docs.openclaw.ai/). Wraps M365 Copilot's WebSocket/SignalR API in an OpenAI-compatible interface with tool calling support.
+Fork of `m365-copilot-proxy` adapted for OpenCode and other OpenAI-compatible coding agents. It exposes Microsoft 365 Copilot through an OpenAI-compatible API while preserving the upstream reverse-engineering, tool-calling and benchmarking work.
+
+> This repository is a fork. Upstream development originated in `cramt/m365-copilot-proxy`; this fork focuses on OpenCode-oriented workflows and experimentation.
 
 > **Want the gory protocol details?** See [docs/m365-copilot-api.md](docs/m365-copilot-api.md) — a full write-up of M365 Copilot's undocumented WebSocket API: auth, SignalR frames, tones/models, throttling, the "Disengaged" filter, and the Copilot Studio agent trick that makes tool calling work.
+
+## Quick start (OpenCode)
+
+Point OpenCode at the local proxy. `examples/opencode.jsonc` is a complete,
+ready-to-copy provider block for `~/.config/opencode/opencode.jsonc`:
+
+```json
+{
+  "provider": {
+    "m365": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "M365 Copilot (own account)",
+      "options": {
+        "baseURL": "http://127.0.0.1:4141/v1",
+        "apiKey": "not-needed"
+      },
+      "models": {
+        "gpt-6.1-sol": {
+          "name": "M365: GPT-6.1 Sol",
+          "tool_call": true,
+          "attachment": false,
+          "limit": { "context": 1050000, "output": 128000 }
+        }
+      }
+    }
+  },
+  "model": "m365/gpt-6.1-sol",
+  "small_model": "m365/gpt-6.1-sol"
+}
+```
+
+Full example with every model `/v1/models` serves (Claude Sonnet 5.5, Opus, Copilot, ...): [`examples/opencode.jsonc`](examples/opencode.jsonc).
+
+`limit` mirrors each model's published window, and `/v1/models` advertises the
+same numbers (a test keeps `examples/opencode.jsonc` in sync): GPT-5.2 400k/128k,
+GPT-5.3 128k/16k, GPT-5.4 and newer 1.05M/128k, Claude 1M/128k. They drive
+OpenCode's `% used` meter and its auto-compaction, so compaction fires when the
+real model window is nearly full. Unknown tones fall back to `M365_CONTEXT_WINDOW`
+/ `M365_MAX_OUTPUT_TOKENS`. M365 does not expose token counts, so the proxy
+reports an estimate (~4 chars/token) and the meter moves with the conversation.
+
+### Recovery commands
+
+Send one of these as the **whole message** (a mention inside a sentence does
+nothing). They are control messages: the proxy strips them from the prompt.
+
+| Command | What it does | When to use it |
+|---|---|---|
+| `RESTORECONTEXT` (alias `RESTORESESSION`) | Starts a **fresh upstream M365 conversation** and replays the last 700 transcript lines, plus the original task and the latest instruction as anchors. | The thread has lost/truncated context, a huge tool result pushed the task out, or the upstream conversation is degraded. Costs one new M365 thread. |
+| `RESENDTOOLS` (aliases `RESTORETOOLS`, `SENDTOOLS`) | Keeps the **same conversation** and re-sends the tool definitions and framing with the current history — the manual version of the automatic give-up retry. No replay, no new thread. | The model "forgot" it has tools, answered in prose, or asked you to run commands yourself, while the rest of the context is still fine. |
+
+The proxy also detects give-up confabulations automatically (`looksLikeConfabulation`)
+and forces one retry in the same conversation; when that retry recovers a real tool
+call, the reply is prefixed with `TOOLS RESTORED`.
 
 ## How it works
 
 M365 Copilot uses a SignalR WebSocket protocol, not the OpenAI API. This project translates between the two:
 
-1. **Standalone proxy** — HTTP server with `/v1/chat/completions` and `/v1/models` endpoints. Works with any OpenAI-compatible client (pi, OpenClaw, etc.).
+1. **Standalone proxy** — HTTP server with `/v1/chat/completions` and `/v1/models` endpoints. Works with OpenCode and other OpenAI-compatible clients.
 2. **OpenClaw plugin** — Config generator + setup CLI for OpenClaw's provider system.
+
+## About this fork
+
+This repository tracks the upstream project while focusing on OpenCode compatibility and integration.
+
+If upstream documentation and this repository differ, prefer the documentation and behaviour present in this fork.
+
+### Fork-specific changes
+
+- Repository URL: `https://github.com/Bertogim/m365-copilot-proxy-opencode`
+- Primary target: OpenCode-compatible coding agents and harnesses
+- OpenCode-oriented compatibility improvements and defaults
+- Upstream ideas may be merged selectively, but behaviour described in this repository should be treated as authoritative for this fork
+
+### Why this fork exists
+
+The upstream project provides an OpenAI-compatible wrapper around Microsoft 365 Copilot. This fork focuses on making M365 models work reliably inside OpenCode.
+
+A major challenge is that Microsoft 365 Copilot does not natively support the tool-calling patterns expected by OpenAI-compatible agents. Different model families also behave differently: some naturally emit shell-style actions, some prefer their own sandbox, and others require specific framing to reliably follow tool instructions.
+
+This fork contains the translation, routing and framing layers needed to bridge that gap. Rather than exposing raw M365 behaviour, it adapts requests to the formats that each model family follows most reliably, normalizes tool calls back into OpenAI-compatible responses, and applies model-specific defaults so OpenCode can interact with GPT, Claude and other M365-backed models through a consistent interface.
+
+The result is more reliable tool execution, fewer compatibility issues between model families, and a smoother OpenCode experience than a generic OpenAI-compatibility wrapper. The goal of this fork is compatibility, not research: make M365-backed models behave as predictably as possible inside OpenCode.
 
 ### Tool calling
 
@@ -77,8 +156,8 @@ Each agent session reuses the same M365 conversation (same `sessionId` + `conver
 ### 1. Install
 
 ```sh
-git clone https://github.com/cramt/m365-copilot-proxy
-cd m365-copilot-proxy
+git clone https://github.com/Bertogim/m365-copilot-proxy-opencode
+cd m365-copilot-proxy-opencode
 pnpm install
 pnpm build
 ```

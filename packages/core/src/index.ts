@@ -87,6 +87,8 @@ export {
   defaultFramingForModel,
   transcriptStyleForVariant,
   FRAMING_VARIANT_NAMES,
+  buildSpecMap,
+  canonicalFenceName,
   longHeredocAsWrite,
   type TranscriptStyle,
 } from "./fenced.js";
@@ -119,6 +121,7 @@ export {
   formatToolDefinitions,
   formatToolChoiceInstruction,
   getMessageContent,
+  adaptOpenCodeTools,
   parseToolCalls,
   looksLikeConfabulation,
   looksLikeHallucinatedCompletion,

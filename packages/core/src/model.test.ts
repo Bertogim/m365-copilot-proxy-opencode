@@ -9,7 +9,11 @@ const wire = vi.hoisted(() => ({ events: [] as string[], failures: 0 }));
 vi.mock("./session.js", () => ({
   CopilotSession: class {
     turnCount = 0;
+    constructor(options?: { initialTurnCount?: number }) {
+      this.turnCount = options?.initialTurnCount ?? 0;
+    }
     chat(token: string) {
+      this.turnCount++;
       wire.events.push(`chat:${token}`);
       if (wire.failures > 0) {
         wire.failures--;
@@ -33,6 +37,33 @@ afterEach(() => {
 });
 
 describe("ModelSession.run's reconnect", () => {
+  it("preserves conversation progress across a transport reconnect", async () => {
+    const model = session();
+    await model.run("original task", "claude-sonnet", undefined, false);
+    const conversationId = model.conversationId;
+    expect(model.turnCount).toBe(1);
+    wire.failures = 1;
+    await model.run("tool output", "claude-sonnet", undefined, false);
+    expect(model.conversationId).toBe(conversationId);
+    expect(model.turnCount).toBe(3);
+  });
+
+  it("preserves progress on reset but clears it for a new conversation", async () => {
+    const model = session();
+    await model.run("original task", "claude-sonnet", undefined, false);
+    const conversationId = model.conversationId;
+    model.reset();
+    expect(model.turnCount).toBe(1);
+    await model.run("continuation", "claude-sonnet", undefined, false);
+    expect(model.conversationId).toBe(conversationId);
+    expect(model.turnCount).toBe(2);
+    model.newConversation();
+    expect(model.conversationId).not.toBe(conversationId);
+    expect(model.turnCount).toBe(0);
+    await model.run("fresh task", "claude-sonnet", undefined, false);
+    expect(model.turnCount).toBe(1);
+  });
+
   it("waits on the turn budget before it sends the turn again, with a fresh token after a wait", async () => {
     wire.failures = 1;
     const waitForBudget = async () => { wire.events.push("wait"); return { waitedMs: 30_000 }; };

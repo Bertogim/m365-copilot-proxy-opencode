@@ -146,13 +146,24 @@ async function streamContents(deltas: string[], fullText?: string): Promise<stri
   return contents;
 }
 
-describe("incremental streaming (non-tool path)", () => {
-  it("forwards deltas as separate chunks, not one buffered blob", async () => {
-    const contents = await streamContents(["Hello", ", ", "world", "!"]);
-    // Genuinely incremental: each delta is its own chunk.
+describe("filtered streaming (non-tool path)", () => {
+  it("streams ordinary prose incrementally while preserving the complete answer", async () => {
+    const contents = await streamContents(["Hello", ", ", "world", "! This is a longer answer.", " More text arrives now."]);
+    // Safe prose arrives in multiple chunks; image payloads remain filtered.
     expect(contents.length).toBeGreaterThan(1);
     // Lossless and in-order: reconstructs the full answer exactly once.
-    expect(contents.join("")).toBe("Hello, world!");
+    expect(contents.join("")).toBe("Hello, world! This is a longer answer. More text arrives now.");
+  });
+
+  it("filters an image data URL even when its prefix spans multiple upstream deltas", async () => {
+    // Invalid image bytes: no file should be saved, and no data URL may leak.
+    const contents = await streamContents(["Antes ", "data:im", "age/png;base64,", "AAAA", " despues"]);
+    const text = contents.join("");
+    expect(text).toContain("Antes ");
+    expect(text).toContain("despues");
+    expect(text).not.toContain("data:image");
+    expect(text).not.toContain("AAAA");
+    expect(text).toContain("Image omitted");
   });
 
   it("emits the trailing remainder once when the final text outruns the delta stream", async () => {
@@ -162,6 +173,67 @@ describe("incremental streaming (non-tool path)", () => {
     expect(contents.join("")).toBe("Hello world");
     // No duplicated prefix.
     expect(contents.join("").match(/Hello/g)?.length).toBe(1);
+  });
+});
+
+describe("usage token estimates (OpenCode v1/v2 context meter)", () => {
+  const body = (content: string, stream: boolean) => ChatCompletionRequest.parse({
+    model: "gpt-6.1-sol",
+    stream,
+    ...(stream ? { stream_options: { include_usage: true } } : {}),
+    messages: [
+      { role: "system", content: "sys" },
+      { role: "user", content },
+    ],
+  });
+
+  afterEach(() => {
+    delete process.env.M365_TOKEN_ESTIMATE;
+    scripted.deltas = [];
+    scripted.fullText = undefined;
+  });
+
+  it("reports non-zero prompt/completion tokens in the non-stream usage block", async () => {
+    scripted.deltas = ["Hello there, this is a complete answer."];
+    scripted.fullText = "Hello there, this is a complete answer.";
+    const res = await respond(body("x".repeat(4000), false));
+    const usage = (await res.json()).usage;
+    expect(usage.prompt_tokens).toBeGreaterThan(0);
+    expect(usage.completion_tokens).toBeGreaterThan(0);
+    expect(usage.total_tokens).toBe(usage.prompt_tokens + usage.completion_tokens);
+    expect(usage.x_m365_tokens_source).toBe("estimated");
+    // ~4 chars/token, so a 4k-char user turn lands near 1k prompt tokens.
+    expect(usage.prompt_tokens).toBeGreaterThan(900);
+  });
+
+  it("sends the same estimate in the final streaming chunk when include_usage is set", async () => {
+    scripted.deltas = ["streamed answer"];
+    scripted.fullText = "streamed answer";
+    const res = await handleChatCompletion(body("y".repeat(800), true), new SessionPool());
+    const text = await res.text();
+    let usage: any;
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      const payload = line.slice(6);
+      if (payload === "[DONE]") continue;
+      const chunk = JSON.parse(payload);
+      if (chunk.usage) usage = chunk.usage;
+    }
+    expect(usage).toBeDefined();
+    expect(usage.prompt_tokens).toBeGreaterThan(0);
+    expect(usage.completion_tokens).toBeGreaterThan(0);
+    expect(usage.total_tokens).toBe(usage.prompt_tokens + usage.completion_tokens);
+  });
+
+  it("can be turned off with M365_TOKEN_ESTIMATE=0", async () => {
+    process.env.M365_TOKEN_ESTIMATE = "0";
+    scripted.deltas = ["answer"];
+    scripted.fullText = "answer";
+    const usage = (await (await respond(body("hello", false))).json()).usage;
+    expect(usage.prompt_tokens).toBe(0);
+    expect(usage.completion_tokens).toBe(0);
+    expect(usage.total_tokens).toBe(0);
+    expect(usage.x_m365_tokens_source).toBeUndefined();
   });
 });
 
@@ -1224,4 +1296,752 @@ describe("stopping a turn that writes its own <tool_response> (early stop)", () 
     expect(scripted.stoppedAfter).toBeNull();
     expect(JSON.parse(msg.tool_calls[0].function.arguments).command).toBe("ls");
   });
+});
+
+
+describe("local history continuity regressions", () => {
+  const tools = [{
+    type: "function",
+    function: {
+      name: "bash",
+      parameters: {
+        type: "object",
+        properties: { command: { type: "string" } },
+      },
+    },
+  }];
+
+  async function ask(pool: InstanceType<typeof SessionPool>, messages: any[]) {
+    const response = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol",
+      stream: false,
+      tools,
+      messages,
+    }), pool);
+    expect(response.status).toBe(200);
+    return (await response.json()).choices[0].message;
+  }
+
+  afterEach(() => {
+    scripted.queue = [];
+    scripted.result = null;
+    resetAgentRoutes();
+  });
+
+  it("does not replay earlier history on an append-only tool continuation", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "```bash\nls\n```" },
+      { fullText: "Received." },
+    ];
+    const pool = new SessionPool();
+    const messages: any[] = [
+      { role: "user", content: "ORIGINAL_TASK_CONTEXT: repair the parser without changing ordering." },
+    ];
+    const first = await ask(pool, messages);
+    messages.push(
+      { role: "assistant", content: null, tool_calls: first.tool_calls },
+      { role: "tool", tool_call_id: first.tool_calls[0].id, content: "EARLIER_RESULT_CONTEXT: /project/parser" },
+      { role: "user", content: "LATEST_DECISION_CONTEXT: preserve comments as well." },
+    );
+    const second = await ask(pool, messages);
+    messages.push(
+      { role: "assistant", content: null, tool_calls: second.tool_calls },
+      { role: "tool", tool_call_id: second.tool_calls[0].id, content: "CURRENT_COMMAND_OUTPUT: parser.ts" },
+    );
+    await ask(pool, messages);
+    const sent = scripted.texts.at(-1)!;
+    expect(sent).not.toContain("ORIGINAL_TASK_CONTEXT");
+    expect(sent).not.toContain("LATEST_DECISION_CONTEXT");
+    expect(sent).not.toContain("EARLIER_RESULT_CONTEXT");
+    expect(sent).toContain("CURRENT_COMMAND_OUTPUT");
+    expect(sent).not.toContain("REFERENCE TRANSCRIPT");
+  });
+
+  it("replays the task when an inserted system message shifts the history", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "Received." },
+    ];
+    const pool = new SessionPool();
+    const opener = { role: "user", content: "TASK_CONTEXT_INSERTION: inspect the project, then fix its parser." };
+    const call = await ask(pool, [opener]);
+    await ask(pool, [
+      { role: "system", content: "WORKSPACE_CONTEXT_INSERTION: /project/parser" },
+      opener,
+      { role: "assistant", content: null, tool_calls: call.tool_calls },
+      { role: "tool", tool_call_id: call.tool_calls[0].id, content: "/project/parser" },
+    ]);
+    const sent = scripted.texts[scripted.texts.length - 1];
+    expect(sent).toContain("WORKSPACE_CONTEXT_INSERTION");
+    expect(sent).toContain("TASK_CONTEXT_INSERTION");
+  });
+
+  it("replays corrected earlier output instead of silently skipping it", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "Received." },
+      { fullText: "Received correction." },
+    ];
+    const pool = new SessionPool();
+    const opener = { role: "user", content: "TASK_CONTEXT_CORRECTION: inspect the project and keep working." };
+    const call = await ask(pool, [opener]);
+    const history: any[] = [
+      opener,
+      { role: "assistant", content: null, tool_calls: call.tool_calls },
+      { role: "tool", tool_call_id: call.tool_calls[0].id, content: "OLD_OUTPUT_CONTEXT" },
+    ];
+    await ask(pool, history);
+    await ask(pool, [
+      ...history.slice(0, 2),
+      { ...history[2], content: "CORRECTED_OUTPUT_CONTEXT: actual workspace is /project/real" },
+      { role: "assistant", content: "Received." },
+      { role: "user", content: "Continue the original task using the corrected output." },
+    ]);
+    const sent = scripted.texts[scripted.texts.length - 1];
+    expect(sent).toContain("CORRECTED_OUTPUT_CONTEXT");
+    expect(sent).toContain("TASK_CONTEXT_CORRECTION");
+  });
+});
+
+
+describe("incremental streaming with workspace tools", () => {
+  const tools = [{
+    type: "function",
+    function: { name: "bash", parameters: { type: "object", properties: { command: { type: "string" } } } },
+  }];
+
+  async function collect(deltas: string[], continued = false, requestTools: unknown[] = tools) {
+    scripted.result = null;
+    scripted.queue = [];
+    scripted.deltas = deltas;
+    scripted.fullText = undefined;
+    const response = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol", stream: true, tools: requestTools,
+      messages: [
+        { role: "user", content: "Inspect the project." },
+        ...(continued ? [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{
+              id: "call_previous",
+              type: "function",
+              function: { name: "bash", arguments: "{\"command\":\"pwd\"}" },
+            }],
+          },
+          { role: "tool", tool_call_id: "call_previous", content: "/project" },
+        ] : []),
+      ],
+    }), new SessionPool());
+    const chunks = (await response.text()).split("\n")
+      .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map(line => JSON.parse(line.slice(6)));
+    return chunks;
+  }
+
+  afterEach(() => {
+    scripted.queue = [];
+    scripted.deltas = [];
+    scripted.fullText = undefined;
+    resetAgentRoutes();
+  });
+
+  it("streams prose in multiple chunks even when tools are available", async () => {
+    const deltas = [
+      "The parser reads the configuration and validates each entry before passing it to the next stage. ".repeat(3),
+      "The next stage keeps the original ordering and reports invalid entries explicitly. ",
+      "This preserves the intended behavior and makes the result easier to inspect.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.length).toBeGreaterThan(1);
+    expect(content.join("")).toBe(deltas.join(""));
+  });
+
+  it("keeps streaming a deployment summary after actual tool use and an inline filename", async () => {
+    const deltas = [
+      "Previously deployed 27-event catalog, shop server UI improvements, and OP Roles pre-round weighting/restoration fixes.\n",
+      "Implemented and deployed event IDs 1–27, persisted in `eventos",
+      ".json`.\n",
+      "The identifiers remain stable across restarts. ",
+      "The configuration preserves all 27 events.",
+    ];
+    const chunks = await collect(deltas, true);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.join("")).toBe(deltas.join(""));
+    expect(content).toContain(".json`.\n");
+    expect(content).toContain("The identifiers remain stable across restarts. ");
+    expect(content).toContain("The configuration preserves all 27 events.");
+    expect(chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? [])).toHaveLength(0);
+  });
+
+  it("never streams a raw tool fence split across upstream deltas", async () => {
+    const chunks = await collect(["`", "``ba", "sh\n", "pwd", "\n```"]);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("");
+    expect(content).toBe("");
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function.name).toBe("bash");
+    expect(calls[0].function.arguments).toBe("");
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(calls[1].index).toBe(0);
+    expect(calls[1].id).toBeUndefined();
+    expect(calls[1].function.name).toBeUndefined();
+    expect(JSON.parse(calls.map(call => call.function.arguments).join("")).command).toBe("pwd");
+    expect(chunks.some(chunk => chunk.choices?.[0]?.delta?.reasoning_content)).toBe(false);
+  });
+
+  it("waits for the complete shell header before starting native tool input", async () => {
+    const chunks = await collect(["```bash", "\n", "pwd", "\n```"]);
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "bash", arguments: "" });
+    expect(JSON.parse(calls[1].function.arguments)).toEqual({ command: "pwd" });
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
+  it("does not start native tool input for a longer ordinary fence name", async () => {
+    const deltas = ["```bash", "-example\n", "pwd\n", "```"];
+    const chunks = await collect(deltas);
+    expect(chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? [])).toHaveLength(0);
+    expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe(deltas.join(""));
+  });
+
+  for (const fence of ["shell", "bash", "sh"]) {
+    it(`starts native shell input for a ${fence} fence when the harness tool is shell`, async () => {
+      const requestTools = [{
+        type: "function",
+        function: {
+          name: "shell",
+          parameters: {
+            type: "object",
+            properties: { command: { type: "string" } },
+          },
+        },
+      }];
+      const chunks = await collect(["``", "`" + fence, "\n", "pwd", "\n```"], false, requestTools);
+      const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+      expect(calls).toHaveLength(2);
+      expect(calls[0].function).toEqual({ name: "shell", arguments: "" });
+      expect(calls[0].id).toMatch(/^call_/);
+      expect(calls[1].index).toBe(0);
+      expect(calls[1].id).toBeUndefined();
+      expect(calls[1].function.name).toBeUndefined();
+      expect(JSON.parse(calls[1].function.arguments)).toEqual({ command: "pwd" });
+      expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+      expect(chunks.some(chunk => chunk.choices?.[0]?.delta?.reasoning_content)).toBe(false);
+      expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+    });
+  }
+
+  for (const name of ["patch", "apply_patch", "edit", "write", "edit_file", "write_file"]) {
+    it(`starts native ${name} input before delivering validated arguments`, async () => {
+      const patchTool = name === "patch" || name === "apply_patch";
+      const properties = patchTool
+        ? { patchText: { type: "string" } }
+        : { filePath: { type: "string" }, content: { type: "string" } };
+      const requestTools = [{
+        type: "function",
+        function: { name, parameters: { type: "object", properties } },
+      }];
+      const body = patchTool
+        ? "*** Begin Patch\n*** Add File: example.txt\n+hello\n*** End Patch"
+        : "filePath: example.txt\n\nhello";
+      const chunks = await collect(["``", "`" + name, "\n", body, "\n```"], false, requestTools);
+      const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+      expect(calls).toHaveLength(2);
+      expect(calls[0].function).toEqual({ name, arguments: "" });
+      expect(calls[0].id).toMatch(/^call_/);
+      expect(calls[1].index).toBe(0);
+      expect(calls[1].id).toBeUndefined();
+      expect(calls[1].function.name).toBeUndefined();
+      const args = JSON.parse(calls[1].function.arguments);
+      if (patchTool) expect(args.patchText).toBe(body);
+      else {
+        expect(args.filePath).toBe("example.txt");
+        expect(args.content).toBe("hello");
+      }
+      expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+      expect(chunks.some(chunk => chunk.choices?.[0]?.delta?.reasoning_content)).toBe(false);
+      expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+    });
+  }
+
+  it("continues streaming after an ordinary code example with a split header", async () => {
+    const deltas = [
+      "This example describes the configuration without executing any workspace tool. ",
+      "``",
+      "`j",
+      "son\n",
+      '{"enabled": true}\n',
+      "``",
+      "`\n",
+      "The explanation continues immediately after the example. ",
+      "Additional details must arrive before the final response is complete.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.join("")).toBe(deltas.join(""));
+    expect(content.some(text => text.includes("explanation continues"))).toBe(true);
+    expect(content[content.length - 1]).not.toContain("explanation continues");
+    expect(chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? [])).toHaveLength(0);
+  });
+
+  it("does not hold a short prose answer until the upstream turn finishes", async () => {
+    const deltas = [
+      "The configuration is valid and the parser preserves its original ordering. ",
+      "No additional changes are needed.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.length).toBeGreaterThan(1);
+    expect(content.join("")).toBe(deltas.join(""));
+  });
+
+  it("streams inline code spans with backticks progressively even when split across deltas", async () => {
+    const deltas = [
+      "- Added ",
+      "`party",
+      "Presence` ",
+      "to handle the new case. ",
+      "The fix ensures consistent behavior.",
+    ];
+    const chunks = await collect(deltas);
+    const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content).filter(Boolean);
+    expect(content.length).toBeGreaterThan(1);
+    expect(content.join("")).toBe(deltas.join(""));
+    expect(chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? [])).toHaveLength(0);
+  });
+
+  it("does not rotate a conversation merely because object keys change order", async () => {
+    scripted.newConversations = 0;
+    scripted.queue = [{ fullText: "Received." }, { fullText: "Continued." }];
+    const pool = new SessionPool();
+    const post = (messages: any[]) => handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol", stream: false, tools, messages,
+    }), pool);
+    await post([{ role: "user", content: "Keep this task context." }]);
+    await post([
+      { content: "Keep this task context.", role: "user" },
+      { role: "assistant", content: "Received." },
+      { role: "user", content: "Continue." },
+    ]);
+    expect(scripted.newConversations).toBe(0);
+  });
+});
+
+describe("workspace framing on continued tool turns", () => {
+  it("keeps initial workspace framing without repeating it or rotating the thread", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.newConversations = 0;
+    scripted.queue = [{ fullText: "```bash\npwd\n```" }, { fullText: "Done." }];
+    const pool = new SessionPool();
+    const tools = [{
+      type: "function",
+      function: { name: "bash", parameters: { type: "object", properties: { command: { type: "string" } } } },
+    }];
+    const messages: any[] = [
+      { role: "system", content: "WORKSPACE_REFRESH: /project/real; use the local harness tools." },
+      { role: "user", content: "Inspect the current project." },
+    ];
+    const post = async () => {
+      const response = await handleChatCompletion(ChatCompletionRequest.parse({
+        model: "gpt-6.1-sol", stream: false, tools, messages,
+      }), pool);
+      expect(response.status).toBe(200);
+      return (await response.json()).choices[0].message;
+    };
+    try {
+      const first = await post();
+      messages.push(
+        { role: "assistant", content: null, tool_calls: first.tool_calls },
+        { role: "tool", tool_call_id: first.tool_calls[0].id, content: "/project/real" },
+      );
+      await post();
+      expect(scripted.newConversations).toBe(0);
+      expect(scripted.texts[0]).toContain("WORKSPACE_REFRESH");
+      expect(scripted.texts[0]).toContain("My workflow preferences for this task:");
+      expect(scripted.texts[1]).not.toContain("WORKSPACE_REFRESH");
+      expect(scripted.texts[1]).not.toContain("My workflow preferences for this task:");
+      expect(scripted.texts[1]).not.toContain("Before the task, a note on how we'll work:");
+      expect(scripted.texts[1]).toContain('<tool_response tool="bash"');
+    } finally {
+      scripted.queue = [];
+      resetAgentRoutes();
+    }
+  });
+});
+
+
+describe("RESTORECONTEXT", () => {
+  afterEach(() => {
+    scripted.queue = [];
+    scripted.result = null;
+    resetAgentRoutes();
+  });
+
+  async function post(pool: InstanceType<typeof SessionPool>, messages: any[], stream = false) {
+    scripted.result = null;
+    scripted.queue = [{ fullText: "Context received." }];
+    const response = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol", stream, messages,
+    }), pool);
+    expect(response.status).toBe(200);
+    await response.text();
+    return scripted.texts.at(-1)!;
+  }
+
+  it("replays exactly the last 700 transcript lines and preserves current instructions", async () => {
+    const messages: any[] = [
+      { role: "system", content: "CURRENT_WORKSPACE_RULES" },
+      { role: "user", content: Array.from({ length: 900 }, (_, i) => `HISTORY_LINE_${i}`).join("\n") },
+      { role: "assistant", content: "LAST_VERIFIED_STATE" },
+      { role: "user", content: "  RESTORECONTEXT\n" },
+    ];
+    const original = JSON.stringify(messages);
+    const prompt = await post(new SessionPool(), messages);
+    const recovered = prompt.split("BEGIN RECOVERED HISTORY\n")[1]
+      .split("\nEND RECOVERED HISTORY")[0];
+    expect(recovered.split("\n")).toHaveLength(700);
+    expect(recovered).not.toContain("HISTORY_LINE_0\n");
+    expect(recovered).toContain("HISTORY_LINE_899");
+    expect(recovered).toContain("LAST_VERIFIED_STATE");
+    expect(prompt).toContain("CURRENT_WORKSPACE_RULES");
+    expect(JSON.stringify(messages)).toBe(original);
+  });
+
+  it("restores into a fresh upstream conversation and then continues that conversation normally", async () => {
+    const pool = new SessionPool();
+    const messages: any[] = [{ role: "user", content: "ORIGINAL_TASK_MARKER" }];
+    await post(pool, messages);
+    const rotations = scripted.newConversations;
+    messages.push(
+      { role: "assistant", content: null, tool_calls: [{
+        id: "call-restore", type: "function",
+        function: { name: "bash", arguments: '{"command":"pwd"}' },
+      }] },
+      { role: "tool", tool_call_id: "call-restore", content: "REAL_WORKSPACE_RESULT" },
+      { role: "user", content: "RESTORECONTEXT" },
+    );
+    const prompt = await post(pool, messages, true);
+    expect(prompt).toContain("ORIGINAL_TASK_MARKER");
+    expect(prompt).toContain("pwd");
+    expect(prompt).toContain("REAL_WORKSPACE_RESULT");
+    expect(prompt).toContain("BEGIN RECOVERED HISTORY");
+    expect(scripted.newConversations).toBe(rotations + 1);
+    messages.push(
+      { role: "assistant", content: "Context received." },
+      { role: "user", content: "Continue normally." },
+    );
+    const next = await post(pool, messages);
+    expect(next).not.toContain("BEGIN RECOVERED HISTORY");
+    expect(scripted.newConversations).toBe(rotations + 1);
+  });
+
+  it("preserves the task and latest steering when a long tool result fills the replay window", async () => {
+    const messages: any[] = [
+      { role: "system", content: "CURRENT_WORKSPACE_RULES" },
+      { role: "user", content: "ORIGINAL_TASK: repair context restoration, not the image viewer." },
+      { role: "assistant", content: "I will inspect the handler." },
+      { role: "user", content: "LATEST_STEERING: preserve existing changes and do not implement PDF selection." },
+      { role: "assistant", content: null, tool_calls: [{
+        id: "call-long-output", type: "function",
+        function: { name: "bash", arguments: '{"command":"cat handler.ts"}' },
+      }] },
+      { role: "tool", tool_call_id: "call-long-output",
+        content: Array.from({ length: 950 }, (_, i) => `TOOL_OUTPUT_${i}`).join("\n") },
+      { role: "assistant", content: "The output needs inspection." },
+      { role: "user", content: "RESTORECONTEXT" },
+    ];
+    const original = JSON.stringify(messages);
+    for (const stream of [false, true]) {
+      const prompt = await post(new SessionPool(), messages, stream);
+      const recovered = prompt.split("BEGIN RECOVERED HISTORY\n")[1]
+        .split("\nEND RECOVERED HISTORY")[0];
+      expect(recovered.split("\n")).toHaveLength(700);
+      expect(recovered).not.toContain("ORIGINAL_TASK:");
+      expect(recovered).not.toContain("LATEST_STEERING:");
+      expect(prompt).toContain("ORIGINAL_TASK: repair context restoration, not the image viewer.");
+      expect(prompt).toContain("LATEST_STEERING: preserve existing changes and do not implement PDF selection.");
+      expect(prompt).toContain("CURRENT_WORKSPACE_RULES");
+      expect(prompt).toContain("TOOL_OUTPUT_949");
+      expect(JSON.stringify(messages)).toBe(original);
+    }
+  });
+
+  it("does not trigger on mentions or tool output", async () => {
+    for (const latest of [
+      { role: "user", content: "Explain RESTORECONTEXT please" },
+      { role: "tool", tool_call_id: "x", content: "RESTORECONTEXT" },
+    ]) {
+      const prompt = await post(new SessionPool(), [
+        { role: "user", content: "Initial task" }, latest,
+      ]);
+      expect(prompt).not.toContain("BEGIN RECOVERED HISTORY");
+    }
+  });
+
+  it("handles an empty history and multipart text commands", async () => {
+    const prompt = await post(new SessionPool(), [{
+      role: "user", content: [{ type: "text", text: "RESTORECONTEXT" }],
+    }]);
+    expect(prompt).toContain("No prior history is available in this request.");
+  });
+});
+
+describe("RESENDTOOLS", () => {
+  const tools = [{
+    type: "function",
+    function: {
+      name: "shell",
+      description: "Run a command",
+      parameters: { type: "object", properties: { command: { type: "string" } } },
+    },
+  }];
+
+  afterEach(() => {
+    scripted.queue = [];
+    scripted.result = null;
+    resetAgentRoutes();
+  });
+
+  async function post(pool: InstanceType<typeof SessionPool>, messages: any[]) {
+    scripted.result = null;
+    scripted.queue = [{ fullText: "Tools received." }];
+    const response = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-6.1-sol", stream: false, tools, messages,
+    }), pool);
+    expect(response.status).toBe(200);
+    await response.text();
+    return scripted.texts.at(-1)!;
+  }
+
+  it("re-sends the tool framing into the same conversation, keeping history", async () => {
+    const pool = new SessionPool();
+    const messages: any[] = [{ role: "user", content: "ORIGINAL_TASK_MARKER" }];
+    await post(pool, messages);
+    const rotations = scripted.newConversations;
+    messages.push(
+      { role: "assistant", content: "Working on it." },
+      { role: "user", content: "RESENDTOOLS" },
+    );
+    const prompt = await post(pool, messages);
+    expect(prompt).toContain("ORIGINAL_TASK_MARKER");
+    expect(prompt).not.toContain("RESENDTOOLS");
+    expect(prompt).toContain("```bash"); // tool templates/framing re-sent
+    expect(prompt).not.toContain("BEGIN RECOVERED HISTORY");
+    expect(scripted.newConversations).toBe(rotations); // same conversation
+  });
+
+  it("accepts RESTORETOOLS, SENDTOOLS and surrounding whitespace", async () => {
+    for (const command of ["RESTORETOOLS", "SENDTOOLS", "  resendtools  "]) {
+      const pool = new SessionPool();
+      const messages: any[] = [{ role: "user", content: "TASK_MARKER" }];
+      await post(pool, messages);
+      const rotations = scripted.newConversations;
+      messages.push({ role: "user", content: command });
+      const prompt = await post(pool, messages);
+      expect(prompt).toContain("TASK_MARKER");
+      expect(prompt).toContain("```bash");
+      expect(scripted.newConversations).toBe(rotations);
+    }
+  });
+
+  it("still lets a mention inside a sentence go down the normal delta path", async () => {
+    const pool = new SessionPool();
+    const messages: any[] = [{ role: "user", content: "TASK_MARKER" }];
+    await post(pool, messages);
+    messages.push({ role: "user", content: "Explain RESENDTOOLS please" });
+    const prompt = await post(pool, messages);
+    // A normal continuation sends only the new message, not a full replay.
+    expect(prompt).not.toContain("TASK_MARKER");
+    expect(prompt).toContain("Explain RESENDTOOLS please");
+  });
+});
+
+describe("synthetic proxy waiting indicator", () => {
+  it("adds GPT-6 workflow preferences initially without repeating them on continued tool turns", async () => {
+    const tools = [{
+      type: "function",
+      function: {
+        name: "bash",
+        parameters: { type: "object", properties: { command: { type: "string" } } },
+      },
+    }];
+    try {
+      for (const model of ["gpt-6-think-deeper", "gpt-6-sol", "gpt-6.1-sol", "claude-sonnet"]) {
+        scripted.result = null;
+        scripted.texts = [];
+        scripted.queue = [
+          { fullText: "```bash\npwd\n```" },
+          { fullText: "Done." },
+        ];
+        const pool = new SessionPool();
+        const messages: any[] = [{ role: "user", content: "Inspect this project." }];
+        const post = async () => {
+          const response = await handleChatCompletion(ChatCompletionRequest.parse({
+            model, stream: false, tools, messages,
+          }), pool);
+          expect(response.status).toBe(200);
+          return (await response.json()).choices[0].message;
+        };
+        const first = await post();
+        expect(first.tool_calls).toHaveLength(1);
+        messages.push(
+          { role: "assistant", content: null, tool_calls: first.tool_calls },
+          { role: "tool", tool_call_id: first.tool_calls[0].id, content: "/project" },
+        );
+        await post();
+        expect(scripted.texts).toHaveLength(2);
+        for (const [index, prompt] of scripted.texts.entries()) {
+          if (model === "claude-sonnet" || index > 0) {
+            expect(prompt).not.toContain("My workflow preferences for this task:");
+            expect(prompt).not.toContain("dedicated patch or editing tool");
+            if (index > 0) {
+              expect(prompt).not.toContain("Before the task, a note on how we'll work:");
+            }
+          } else {
+            expect(prompt).toContain("dedicated patch or editing tool");
+            expect(prompt).toContain("[descriptive label](https://example.com/path)");
+            expect(prompt).toContain("Keep sentence punctuation outside the Markdown link");
+            expect(prompt).toContain("not file contents, code examples, or tool arguments");
+            expect(prompt).toContain("Do not create .bak");
+            expect(prompt).toContain("Keep shell output operational");
+            expect(prompt).toContain("final plain-text response outside any tool block");
+          }
+        }
+      }
+    } finally {
+      scripted.queue = [];
+      scripted.result = null;
+      resetAgentRoutes();
+    }
+  });
+
+  async function silentTurn(model: string, disabled = false, toolTurn = false, waitMs = 10_000) {
+    scripted.queue = [];
+    scripted.result = null;
+    scripted.deltas = toolTurn
+      ? ["`", "``sh", "ell", "\n", "pwd", "\n```"]
+      : ["Real response."];
+    scripted.fullText = scripted.deltas.join("");
+    let release!: () => void;
+    scripted.gate = new Promise<void>(resolve => { release = resolve; });
+    const previous = process.env.M365_WAIT_INDICATOR;
+    if (disabled) process.env.M365_WAIT_INDICATOR = "0";
+    else delete process.env.M365_WAIT_INDICATOR;
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
+    try {
+      const pending = handleChatCompletion(ChatCompletionRequest.parse({
+        model, stream: true,
+        ...(toolTurn ? { tools: [{
+          type: "function",
+          function: {
+            name: "shell",
+            parameters: { type: "object", properties: { command: { type: "string" } } },
+          },
+        }] } : {}),
+        messages: [{ role: "user", content: "Describe the project." }],
+      }), new SessionPool()).then(response => response.text());
+      await vi.advanceTimersByTimeAsync(waitMs);
+      release();
+      const text = await pending;
+      const chunks = text.split("\n")
+        .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+        .map(line => JSON.parse(line.slice(6)));
+      expect(vi.getTimerCount()).toBe(0);
+      return chunks;
+    } finally {
+      release();
+      scripted.gate = null;
+      scripted.deltas = [];
+      scripted.fullText = undefined;
+      if (previous === undefined) delete process.env.M365_WAIT_INDICATOR;
+      else process.env.M365_WAIT_INDICATOR = previous;
+      vi.useRealTimers();
+    }
+  }
+
+  for (const model of ["gpt-6-sol", "gpt-6.1-sol"]) {
+    it(`emits separate waiting dots for ${model}, without changing the answer`, async () => {
+      const chunks = await silentTurn(model);
+      const reasoning = chunks.map(c => c.choices?.[0]?.delta?.reasoning_content ?? "").join("");
+      const content = chunks.map(c => c.choices?.[0]?.delta?.content ?? "").join("");
+      const statuses = chunks
+        .map(c => c.choices?.[0]?.delta?.reasoning_content)
+        .filter(status => status !== undefined);
+      expect(statuses).toHaveLength(9);
+      expect(statuses[0]).toBe("The model is thinking internally.");
+      expect(statuses.slice(1)).toEqual(Array(8).fill("."));
+      expect(reasoning).toBe("The model is thinking internally" + ".".repeat(9));
+      expect(content).toBe("Real response.");
+      expect(chunks.at(-1).choices[0].finish_reason).toBe("stop");
+    });
+  }
+
+  it("can be disabled explicitly", async () => {
+    const chunks = await silentTurn("gpt-6.1-sol", true);
+    expect(chunks.some(c => c.choices?.[0]?.delta?.reasoning_content)).toBe(false);
+  });
+
+  it("ends waiting reasoning before starting native input for a split shell header", async () => {
+    const chunks = await silentTurn("gpt-6.1-sol", false, true);
+    const boundary = chunks.findIndex(c =>
+      Array.isArray(c.choices?.[0]?.delta?.tool_calls) &&
+      c.choices[0].delta.tool_calls.length === 0);
+    const start = chunks.findIndex(c =>
+      c.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name === "shell");
+    expect(boundary).toBeGreaterThan(0);
+    expect(start).toBeGreaterThan(boundary);
+    expect(chunks.slice(0, boundary).filter(c =>
+      c.choices?.[0]?.delta?.reasoning_content !== undefined)).toHaveLength(9);
+    expect(chunks.slice(boundary).some(c =>
+      c.choices?.[0]?.delta?.reasoning_content !== undefined)).toBe(false);
+    const calls = chunks.flatMap(c => c.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "shell", arguments: "" });
+    expect(JSON.parse(calls[1].function.arguments)).toEqual({ command: "pwd" });
+    expect(chunks.map(c => c.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
+  for (const waitMs of [100, 1900]) {
+    it(`skips Thinking when native tool output starts after ${waitMs}ms`, async () => {
+      const chunks = await silentTurn("gpt-6.1-sol", false, true, waitMs);
+      expect(chunks.some(c =>
+        c.choices?.[0]?.delta?.reasoning_content !== undefined)).toBe(false);
+      expect(chunks.some(c =>
+        c.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name === "shell")).toBe(true);
+      expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+    });
+  }
+
+  it("shows Thinking at the two-second threshold", async () => {
+    const chunks = await silentTurn("gpt-6.1-sol", false, true, 2000);
+    const statuses = chunks
+      .map(c => c.choices?.[0]?.delta?.reasoning_content)
+      .filter(status => status !== undefined);
+    expect(statuses).toEqual(["The model is thinking internally."]);
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
+  it("shows Thinking for any model whose id doesn't say `think`", async () => {
+    const chunks = await silentTurn("m365-copilot");
+    expect(chunks.some(c => c.choices?.[0]?.delta?.reasoning_content)).toBe(true);
+  });
+
+  for (const model of ["gpt-6-think-deeper", "claude-opus-think-deeper"]) {
+    it(`adds no synthetic reasoning to the reasoning model ${model}`, async () => {
+      const chunks = await silentTurn(model);
+      expect(chunks.some(c => c.choices?.[0]?.delta?.reasoning_content)).toBe(false);
+    });
+  }
 });

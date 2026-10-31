@@ -1447,9 +1447,10 @@ get visibility.
 ```json
 {
   "usage": {
-    "prompt_tokens": 0,
-    "completion_tokens": 0,
-    "total_tokens": 0,
+    "prompt_tokens": 1264,
+    "completion_tokens": 87,
+    "total_tokens": 1351,
+    "x_m365_tokens_source": "estimated",
     "x_m365_conversation_messages": 42,
     "x_m365_conversation_max": 600,
     "x_m365_conversation_pct": 7,
@@ -1463,6 +1464,24 @@ get visibility.
 Useful both for debugging ("are we about to hit the 600 cap?") and for
 distinguishing the agent path (`3PDeclarativeAgent`) from the reasoning path
 (`DeepLeo`) without parsing the body.
+
+**Token counts are estimated (2026-10-31, 🟢 implemented).** Harnesses that render
+a context meter do it as `tokens / model.limit.context` — OpenCode v1 and v2 read
+`usage.prompt_tokens`/`completion_tokens` (normalised to `inputTokens`/`outputTokens`
+by the AI SDK) and `limit.context` from the provider config. With the historical
+zeroes the meter showed nothing, and with no `limit` configured it showed no
+percentage at all (`Math.round(tokens / 0 * 100)` is `null`). The proxy now fills
+`prompt_tokens` from the client's full history (+ tool schemas) and
+`completion_tokens` from the produced text/tool arguments at ~4 chars/token
+(`estimateTokens`/`estimatePromptTokens` in `handler.ts`), marks the block
+`x_m365_tokens_source: "estimated"` and `M365_TOKEN_ESTIMATE=0` restores the zeroes.
+The installer and `examples/opencode.jsonc` write each model's published window
+(GPT-5.2 400k/128k, GPT-5.3 128k/16k, GPT-5.4+ 1.05M/128k, Claude 1M/128k), the
+same values `/v1/models` advertises; unknown tones fall back to
+`M365_CONTEXT_WINDOW`/`M365_MAX_OUTPUT_TOKENS` (default 1M/128k).
+The number is wrong by a constant factor, but it moves with the conversation, which
+is all a utilisation meter needs. It is NOT evidence M365 reports token counts — F5
+still stands.
 
 ---
 
@@ -5612,6 +5631,25 @@ signal. Live check, premium account, no turn sent (reserve set above capacity): 
 waited on keepalives, an unstreamed one queued behind it got its 429 at 2.0 min (`Retry-After` 278 s,
 both turns' refill), and a client that hung up at 22 s had left the line ("behind 1 other request", not 2).
 
+## Oct 24 2026 — conversation progress across transport recreation
+
+Hypothesis: recreating `CopilotSession` with the same conversation ID but a zero
+local counter can contribute to context loss by sending `isStartOfSession:true`
+on a continuation. Code inspection confirms the counter reset on reconnect,
+agent changes, and explicit reset; it does not establish that this caused the
+reported missing-task incident. No debug capture exists for that incident.
+
+Preserve the local attempted-turn count across transport recreation and clear
+it only for a new conversation ID. Offline regression tests cover reconnect,
+reset, and fresh-conversation boundaries. These count attempts, not confirmed
+server turns. Live impact remains unverified.
+
+Falsification/probe: capture a controlled reconnect after a successful turn and
+check the outgoing start flag and recall of an earlier unique task marker.
+If recall still fails with the flag false, investigate server routing/state
+and history selection separately. Do not replace delta continuations with
+unconditional full-history replay.
+
 ## 38. Oct 14 2026 — a content-less `InternalError` drops the turn; "Please continue." loses the request
 
 Seen driving the proxy from T3 Code (Claude Code via cli-proxy-api), `Gpt_6_Sol_Reasoning`, on a
@@ -5640,3 +5678,65 @@ bursty. Falsifier: fresh-conversation retries failing at the same rate as same-c
 Cost to watch: each such retry starts a conversation, which is what the F13 thread-rate throttle
 counts. Bounded to one per dropped turn, but on a bad `InternalError` day it adds up; the same
 afternoon's benching (one conversation per run) did trip `PerUserThrottled`.
+
+### F97 — the forcing retry was blind to Spanish give-ups too 🟡
+
+**Observed.** Live 2026-10-28, GPT-6.1 Sol: "Puedo ponerte comandos para seguir investigando, pero
+no puedo ejecutarlos yo desde aquí." The user's task had tools and the turn ran none, so this went
+back as an ordinary answer — the agent looked like a plain chat that hands the commands back.
+
+**Reading.** F80's lesson repeated: `looksLikeConfabulation` was English + Turkish. The model answers
+in the user's language, so a Spanish request produces Spanish give-ups ("no puedo ejecutarlos desde
+aquí", "no tengo acceso a los archivos", "pégame el contenido", "abre una terminal y ejecuta…") and
+none of the patterns matched. No forcing retry, no 502 — just the wrong answer.
+
+**Change.** Added first-person / session-scoped Spanish patterns, anchored on files, commands or the
+environment (so a Spanish summary of this repo doesn't match), with the same shape as the Turkish
+set. Enclitics ("ejecutarlos") are allowed by dropping the trailing word boundary on the verbs;
+`ver` keeps one so "verde"/"versión" don't match. Unit-tested with the live string plus positives and
+negative summaries; full unit suite green.
+
+**Open.** Not yet measured live (n=0 after the change). Falsifier: Spanish give-ups still reaching
+the user with no "forcing retry" line in the proxy log.
+
+### F98 — opencode's Code Mode is the instruction weak models obey over the framing 🟡
+
+**Trigger.** Live report 2026-10-28: under opencode every model except GPT-6 and GPT-6.1
+answers "no puedo ejecutar comandos" / declines, on requests whose tools are real. Same
+proxy, same account, same task: GPT-6.1 tool-calls. Captured the real request (opencode
+v2.2.0, fake upstream at `/tmp/opencode/requests.jsonl`): 12 tools, and a system message
+whose `# Code Mode` section says tools "cannot be called directly" and must go through
+`execute`, followed by an `<available_skills>` inventory and a catalogue of nested
+`tools.opencode.*` functions.
+
+**Reading.** The proxy emulates tool calls with fences in the user turn. Code Mode is a
+stronger, system-level instruction saying the opposite ("call things through `execute`,
+not directly"). A model that follows the system prompt over the user-voice framing refuses
+in prose; GPT-6/6.1 out-argue it, which is exactly the split the user reported. The section
+is also dead weight: the nested tools are not reachable through the fenced format, and the
+skills inventory advertises a `skill` tool that the trim removes.
+
+**Change (2026-10-29: superseded).** `formatMessages` detects opencode (system message
+matches `running in OpenCode` / `# Code Mode`) and, for that request only, adapts the
+**tool layer**: an allowlist (`shell, read, edit, write, grep, glob, webfetch, websearch,
+question, patch, apply_patch`; `execute`, `skill`, `subagent` dropped) rendered under
+canonical fence names (`shell` → ```bash, `apply_patch` → ```patch, …). The system prompt
+is **passed through untouched** — trimming it to just the user's `Instructions from:` blocks
++ `<env>` was implemented and measured (8,782 → ~155 chars) but reverted: the model needs
+the harness's context, and the harness's tool vocabulary was the real conflict. Parsing
+still uses the original `body.tools`. `M365_OPENCODE_TOOLS=…` replaces the allowlist. Unit
+tests cover detection, the allowlist, the renamed-shell/write fallback, the canonical fence
+names, and a byte-identical non-opencode request.
+
+**Follow-up (2026-10-29).** The `apply_patch` / `question` instructions that shipped as an
+opencode plugin (`plugins/opencode/m365-sol-prompt.mjs`) are now rendered by the proxy
+itself (`harnessNotes()` in `fenced.ts`), next to the tool schemas in every framing variant,
+and only when that tool is offered. The plugin directory is gone, so there is nothing to
+register in opencode and no second system message competing with the framing. The notes also
+state that a shell is **always** there (the "if a shell is available" wording read as "maybe
+it isn't"), and the framings no longer forbid asking the user to paste a file.
+
+**Open.** No live A/B yet (n=0): the account was 429 `PerUserThrottled` from the probes
+that produced the capture. Falsifier: with the trim in place, `claude-sonnet` /
+`gpt-5.5` still give up on a tool task in a fresh opencode session, with no Code Mode text
+in the request.

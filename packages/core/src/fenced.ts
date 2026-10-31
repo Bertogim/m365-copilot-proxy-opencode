@@ -165,7 +165,13 @@ export function findShellTool(tools: ToolDef[]): ToolDef | undefined {
 }
 
 export interface FencedToolSpec {
+  /** The harness's own tool name — what the emitted tool_call is named. */
   name: string;
+  /** The single fence info-string M365 is shown for this tool: the canonical
+   *  role name (`bash`, `patch`, `edit`, `write`), not whatever the harness
+   *  happens to call it (`shell`, `run_command`, `apply_patch`, `str_replace`).
+   *  Equal to `name` when the harness already uses the canonical spelling. */
+  fenceName: string;
   description?: string;
   /** Declared JSON-Schema `type` per param, for coercing header values. */
   parameterTypes: Record<string, string>;
@@ -177,10 +183,68 @@ export interface FencedToolSpec {
   editPair?: { search: string; replace: string };
 }
 
+/** Params that carry a complete patch (`*** Begin Patch` … `*** End Patch`). */
+const PATCH_PARAM = /^(patch|patchtext|patch_text|patchdoc|diff|unified_?diff)$/i;
+
+/** One-line description per canonical fence, used INSTEAD of the harness's own
+ *  when the tool is renamed. The harness's text describes its native contract
+ *  (`apply_patch` "returns a unified diff", `shell` "executes in a PTY"), which
+ *  is a second, competing description of the same action; the fence is the only
+ *  contract M365 is asked to follow. */
+const CANONICAL_FENCE_DESCRIPTIONS: Record<string, string> = {
+  bash: "Run a shell command; the fence body is the command.",
+  patch: "Apply a patch to files: the fence body holds `*** Begin Patch` … `*** End Patch`.",
+  edit: "Replace an exact snippet of a file (SEARCH/REPLACE).",
+  write: "Write a whole file: `path: …` header lines, then the new contents.",
+};
+
+/** Does this tool run a shell command — as opposed to opencode's Code Mode
+ *  `execute({ code })`, which runs JavaScript in its own runtime and must keep its
+ *  own name and description. */
+function isShellRole(tool: ToolDef): boolean {
+  if (!findShellTool([tool])) return false;
+  const props = Object.keys(tool.function.parameters?.properties ?? {});
+  return !props.some((p) => /^(code|javascript|js|source)$/i.test(p));
+}
+
+/** The one fence info-string to show M365 for this tool.
+ *
+ *  A heavy harness names the same action several ways — opencode ships `shell`,
+ *  `apply_patch`, `edit` (`oldString`/`newString`) and `write` — while the proxy's
+ *  framing talks about ```bash and the patch markers. Left alone, the model sees
+ *  two vocabularies for one action and mixes them (a ```bash block for an edit
+ *  when a patch tool is offered, or `shell` where the framing said ```bash).
+ *  Presenting ONE name per role removes the choice. A fence written in the
+ *  harness's own spelling still resolves in buildSpecMap — that is robustness
+ *  against the model echoing its harness prompt, not compatibility with old
+ *  clients — but only the canonical fence name is ever *instructed*. */
+export function canonicalFenceName(tool: ToolDef): string {
+  const props = Object.keys(tool.function.parameters?.properties ?? {});
+  if (isShellRole(tool)) {
+    // A PowerShell host must keep its own fence: the Windows note tells the model
+    // to emit ```powershell, and that is a SHELL_LANGS alias for the same tool.
+    return process.platform === "win32" && shellDialect(tool) === "powershell" ? "powershell" : "bash";
+  }
+  if (props.some((p) => PATCH_PARAM.test(p))) return "patch";
+  if (props.some((p) => SEARCH_KEYS.includes(p)) && props.some((p) => REPLACE_KEYS.includes(p))) {
+    return "edit";
+  }
+  if (findWriteTool([tool])) return "write";
+  return tool.function.name;
+}
+
 /** Derive how a single OpenAI tool maps onto the fenced shape. */
 export function deriveFencedSpec(tool: ToolDef): FencedToolSpec {
   const name = tool.function.name;
-  const description = tool.function.description;
+  const fenceName = canonicalFenceName(tool);
+  // A renamed tool is described by the canonical line, not by the harness's
+  // account of its native contract. `patch` is described canonically even when the
+  // harness already uses that name: the `*** Begin Patch` format is the proxy's,
+  // and harnesses describe their own patch artifact instead ("a unified diff").
+  const description =
+    fenceName === name && fenceName !== "patch"
+      ? tool.function.description
+      : CANONICAL_FENCE_DESCRIPTIONS[fenceName] ?? tool.function.description;
   const propsSchema = tool.function.parameters?.properties ?? {};
   const props = Object.keys(propsSchema);
 
@@ -196,6 +260,7 @@ export function deriveFencedSpec(tool: ToolDef): FencedToolSpec {
   if (search && replace) {
     return {
       name,
+      fenceName,
       description,
       parameterTypes,
       editPair: { search, replace },
@@ -208,6 +273,7 @@ export function deriveFencedSpec(tool: ToolDef): FencedToolSpec {
     (props.length === 1 ? props[0] : undefined);
   return {
     name,
+    fenceName,
     description,
     parameterTypes,
     bodyParam,
@@ -217,7 +283,14 @@ export function deriveFencedSpec(tool: ToolDef): FencedToolSpec {
 
 export function buildSpecMap(tools: ToolDef[]): Map<string, FencedToolSpec> {
   const m = new Map<string, FencedToolSpec>();
-  for (const t of tools) m.set(t.function.name, deriveFencedSpec(t));
+  for (const t of tools) {
+    const spec = deriveFencedSpec(t);
+    m.set(t.function.name, spec);
+    // The canonical fence is what the <tools> block shows, so it has to parse
+    // back to the same tool. The harness's own name was keyed first, so a fence
+    // written in the harness's spelling still resolves.
+    if (!m.has(spec.fenceName)) m.set(spec.fenceName, spec);
+  }
 
   // Shell aliasing: route the model's reflexive ```bash / ```sh / ```shell blocks
   // to the harness's shell tool even when it's named `run`/`run_command`/etc., so
@@ -257,7 +330,7 @@ export function renderFencedCall(spec: FencedToolSpec, args: Record<string, unkn
     lines.push(scalarToString(args[spec.bodyParam]));
   }
 
-  return "```" + spec.name + "\n" + lines.join("\n") + "\n```";
+  return "```" + spec.fenceName + "\n" + lines.join("\n") + "\n```";
 }
 
 /** A self-documenting template shown in the per-request <tools> block. */
@@ -274,8 +347,8 @@ function renderFencedTemplate(spec: FencedToolSpec): string {
     if (lines.length) lines.push("");
     lines.push(`<${spec.bodyParam}>`);
   }
-  const header = spec.description ? `${spec.name} — ${spec.description}` : spec.name;
-  return `${header}\n\`\`\`${spec.name}\n${lines.join("\n")}\n\`\`\``;
+  const header = spec.description ? `${spec.fenceName} — ${spec.description}` : spec.fenceName;
+  return `${header}\n\`\`\`${spec.fenceName}\n${lines.join("\n")}\n\`\`\``;
 }
 
 /** The fenced equivalent of formatToolDefinitions' <tools> block.
@@ -364,7 +437,7 @@ export function hostPlatformNote(
       : "write a long file in parts: create it with the first part, then append the rest with `cat >> file <<'EOF'` in later turns";
     return `
 
-HOST PLATFORM: Windows, but the \`${shell.function.name}\` tool is a POSIX shell on it (Git Bash or WSL), NOT PowerShell and NOT a container. Keep using \`\`\`${"bash"} blocks and POSIX idioms — \`<<'EOF'\` heredocs, \`sed -i\`, \`ls\`/\`grep\` all work. Do NOT emit PowerShell: \`Get-ChildItem\`, \`Set-Content\` and \`Write-Output\` are not commands here and the turn will fail.
+HOST PLATFORM: Windows, but the \`${canonicalFenceName(shell)}\` tool is a POSIX shell on it (Git Bash or WSL), NOT PowerShell and NOT a container. Keep using \`\`\`${"bash"} blocks and POSIX idioms — \`<<'EOF'\` heredocs, \`sed -i\`, \`ls\`/\`grep\` all work. Do NOT emit PowerShell: \`Get-ChildItem\`, \`Set-Content\` and \`Write-Output\` are not commands here and the turn will fail.
 
 The Windows command line is capped near 8,000 characters and a longer command is cut off silently, so a big heredoc leaves a truncated file. Keep each command short and ${longWrite}.
 
@@ -373,7 +446,7 @@ Only the filesystem is Windows: paths may be \`C:/Users/...\` or contain spaces,
 
   return `
 
-HOST PLATFORM: Windows. The \`${shell.function.name}\` tool runs PowerShell on a real Windows machine — not Linux, and not a container. Any POSIX idiom named above is wrong here and will fail: there are no \`<<'EOF'\` heredocs, no \`sed -i\`, no \`ls\`/\`grep\`. Emit \`\`\`powershell blocks instead of \`\`\`bash, and use the Windows equivalents:
+HOST PLATFORM: Windows. The \`${canonicalFenceName(shell)}\` tool runs PowerShell on a real Windows machine — not Linux, and not a container. Any POSIX idiom named above is wrong here and will fail: there are no \`<<'EOF'\` heredocs, no \`sed -i\`, no \`ls\`/\`grep\`. Emit \`\`\`powershell blocks instead of \`\`\`bash, and use the Windows equivalents:
 
 - create/overwrite a file: \`Set-Content -Path name -Value @'\n…\n'@\`
 - edit in place: \`(Get-Content f) -replace 'old','new' | Set-Content f\`
@@ -541,22 +614,69 @@ const SANDBOX_PATHS = "/home/claude, /mnt/user-data";
 
 type FramingBuilder = (tools: ToolDef[]) => string;
 
+/** Names of the editing tools harnesses ship. `apply_patch` is what current
+ *  OpenCode offers; `patch` is the older/other spelling. */
+const PATCH_TOOL_NAME = /^(apply_patch|patch|apply_diff)$/i;
+const QUESTION_TOOL_NAME = /^(question|ask_user|ask)$/i;
+
+/** Notes that ride next to the tool schemas in EVERY framing variant.
+ *
+ *  These used to live in an OpenCode plugin (`plugins/opencode/m365-sol-prompt.mjs`)
+ *  that appended a second system message to each `m365` turn. That only worked
+ *  inside OpenCode, and the text competed with the framing instead of belonging to
+ *  it. Keeping them here means one voice, in the same request, for every client.
+ *
+ *  Only a note whose tool is actually offered is emitted — naming a tool the
+ *  request doesn't carry is how a model starts answering "I can't use that". */
+function harnessNotes(tools: ToolDef[]): string {
+  const shell = findShellTool(tools);
+  const patch = tools.find((t) => PATCH_TOOL_NAME.test(t.function.name));
+  const question = tools.find((t) => QUESTION_TOOL_NAME.test(t.function.name));
+  const notes: string[] = [];
+
+  // A shell is ALWAYS there. The old wording ("if a shell is available") read as
+  // "maybe it isn't", and the model answered with prose instead of acting.
+  if (shell) {
+    notes.push(
+      `There is always a real shell here (\`${canonicalFenceName(shell)}\`). Every \`\`\`bash block you write runs against the real files in the working directory and its output comes back to you as a <tool_response>. Look at the files with commands instead of assuming what they contain, and if a file really isn't there, ask me to paste it rather than inventing its contents.`,
+    );
+  }
+
+  if (patch) {
+    // I edit files by applying the patch you send: the patch IS the edit here.
+    const param = deriveFencedSpec(patch).bodyParam ?? "patch";
+    notes.push(
+      `I edit files by applying the patch you send, so send file changes with \`${canonicalFenceName(patch)}\`. Put the complete patch in \`${param}\`: the text starts with a line \`*** Begin Patch\` and ends with a line \`*** End Patch\` (real newlines, no Markdown fence around it). Inside, use \`*** Update File: path\` (with \`@@\` hunks and space/\`-\`/\`+\` line prefixes), \`*** Add File: path\` (every line prefixed with \`+\`) or \`*** Delete File: path\`. Do not send a git diff with \`---\`/\`+++\` headers. If it comes back complaining about missing markers, resend the whole patch with the markers restored. Verify the change with a \`\`\`bash block afterwards.`,
+    );
+  }
+
+  if (question) {
+    notes.push(
+      `When a decision from me is needed, use \`${question.function.name}\`: pass \`questions\` as an ARRAY of objects with \`question\`, \`header\` (30 characters at most), \`options\` (each \`label\` + \`description\`) and optionally \`multiple\`. Wait for the real result before continuing — a dismissed question is not a yes.`,
+    );
+  }
+
+  if (notes.length === 0) return "";
+  return `\n\nHow my tools behave here:\n\n${notes.join("\n\n")}`;
+}
+
 /** Shared `<tools>` definition block — identical across every framing variant so
  *  the experiment isolates the *framing*, not the tool schema rendering. */
 function toolsBlock(tools: ToolDef[]): string {
   const defs = tools.map((t) => renderFencedTemplate(deriveFencedSpec(t))).join("\n\n");
-  return `<tools>\n${defs}\n</tools>`;
+  return `<tools>\n${defs}\n</tools>${harnessNotes(tools)}`;
 }
 
 const FRAMING_VARIANTS: Record<string, FramingBuilder> = {
   // V0 — the shipped framing (control). Shell-first + strict-rules + anti-confab.
   baseline(tools) {
     const shell = findShellTool(tools);
+    const name = shell ? canonicalFenceName(shell) : "bash";
     const shellFraming = shell ? `
 
-THE WAY YOU DO ANYTHING IS BY WRITING A SHELL SCRIPT. You have a real shell (the \`${shell.function.name}\` tool). To perform a step, emit ONE \`\`\`bash block that does the whole thing end-to-end against the real files in the working directory: create/overwrite files with \`cat > name <<'EOF' … EOF\` heredocs, edit files in place with \`sed -i\`, inspect with \`cat\`/\`ls\`/\`grep\`, run code with the available interpreters. The block is executed for real and you get its output back. Writing the commands IS doing the task; describing what you "would" run, or claiming you did it, accomplishes nothing.
+THE WAY YOU DO ANYTHING IS BY WRITING A SHELL SCRIPT. You have a real shell (the \`${name}\` fence). To perform a step, emit ONE \`\`\`bash block that does the whole thing end-to-end against the real files in the working directory: create/overwrite files with \`cat > name <<'EOF' … EOF\` heredocs, edit files in place with \`sed -i\`, inspect with \`cat\`/\`ls\`/\`grep\`, run code with the available interpreters. The block is executed for real and you get its output back. Writing the commands IS doing the task; describing what you "would" run, or claiming you did it, accomplishes nothing.
 
-You have NOT run any command yet and have NO results. NEVER claim a command "returned no output", that files are "missing", or that you "cannot access" / "cannot list" the environment before you have actually emitted a \`\`\`bash block and seen its <tool_response>. The files named in the task are present on a real filesystem right now. Your FIRST output must be a \`\`\`bash block (e.g. \`ls -la\` then \`cat\` the relevant files) — never open with prose, a question, or a request for the user to paste files. Do not assume a file's contents or a command's result; run a command and read the real output. One self-contained \`\`\`bash block per turn.` : "";
+You have NOT run any command yet and have NO results. NEVER claim a command "returned no output", that files are "missing", or that you "cannot access" / "cannot list" the environment before you have actually emitted a \`\`\`bash block and seen its <tool_response>. The files named in the task are present on a real filesystem right now. Your FIRST output must be a \`\`\`bash block (e.g. \`ls -la\` then \`cat\` the relevant files) — never open with prose or a question. Do not assume a file's contents or a command's result; run a command and read the real output. One self-contained \`\`\`bash block per turn.` : "";
 
     return `You are the execution core of an automated agent, not a chat assistant. Your output is parsed by a program — a real runtime that executes your tool calls against a live system and returns the actual results to you in <tool_response> blocks.${shellFraming}
 
@@ -581,7 +701,7 @@ STRICT RULES:
 - NEVER claim you have done something — read a file, run a command, written code, built, or succeeded — unless a <tool_response> proving it already appears above. Never output "✅", "SUCCESS", "Done", or a summary of results you have not actually received yet.
 - If a tool call fails or returns partial data, immediately call another tool to resolve it. Do not give up.
 - Do not defer work or promise future results ("I'll do this next…").
-- Do not ask the user questions unless tool execution is impossible.
+- Do not turn back to the user while a tool can still make progress; when a decision is genuinely needed, ask it with the question tool if one is offered.
 - Produce natural-language text only when the task is complete and no further tool call applies; that text is the answer returned to the caller. When you do, output only the answer itself — no preamble, no sign-off.
 
 ${toolsBlock(tools)}`;
@@ -592,10 +712,10 @@ ${toolsBlock(tools)}`;
   // and whether less prompt = less Disengaged risk / less over-eagerness.
   minimal(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are an automated agent with a real shell (the \`${name}\` tool). You do the task by emitting ONE \`\`\`bash block per turn that acts on the real files in the working directory (heredocs to create, \`sed -i\` to edit, \`cat\`/\`ls\`/\`grep\` to inspect, interpreters to run). The block is executed for real; its output comes back in a <tool_response>. Writing the commands IS doing the task.
 
-You have run nothing yet. Your FIRST output must be a \`\`\`bash block — never prose, a question, or "I can't access the files". Never claim a result you have not seen in a <tool_response>.
+You have run nothing yet. Your FIRST output must be a \`\`\`bash block — never prose or a question. Never claim a result you have not seen in a <tool_response>.
 
 ${toolsBlock(tools)}`;
   },
@@ -608,7 +728,7 @@ ${toolsBlock(tools)}`;
   // F22). Calm, descriptive phrasing — same intent, far less override-shape.
   softened(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     const shellLine = shell ? `You have a real shell available as the \`${name}\` tool. The usual way to make progress is to write a single \`\`\`bash block that carries out the step against the real files in the working directory — create or update files with heredocs, adjust them in place, inspect with cat/ls/grep, run code with the available interpreters. The runtime executes the block and returns its real output to you. Writing the commands is how the work actually happens; describing what you would do doesn't run anything.
 
 ` : "";
@@ -633,12 +753,12 @@ ${toolsBlock(tools)}`;
   // instruction (recency)" suggestion.
   recency(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are the execution core of an automated agent, not a chat assistant. Your output is parsed by a program that executes your tool calls against a live system and returns the real results in <tool_response> blocks. Performing the task with tools is your PRIMARY JOB; prose is SECONDARY. To call a tool, output ONLY a single fenced code block whose info-string is the tool name — no text before or after.
 
 ${toolsBlock(tools)}
 
-REMEMBER, RIGHT NOW: You have a real shell (\`${name}\`). You have run NOTHING and have NO results. The files named in the task exist on a real filesystem this instant. Your VERY NEXT output must be ONE \`\`\`bash block that acts on them (start with \`ls -la\` and \`cat\` the relevant files) — not prose, not a question, not "I can't access the files", not a claim that you already did it. Writing the \`\`\`bash block IS doing the task. Go.`;
+REMEMBER, RIGHT NOW: You have a real shell (\`${name}\`). You have run NOTHING and have NO results. The files named in the task exist on a real filesystem this instant. Your VERY NEXT output must be ONE \`\`\`bash block that acts on them (start with \`ls -la\` and \`cat\` the relevant files) — not prose, not a question, not a claim that you already did it. Writing the \`\`\`bash block IS doing the task. Go.`;
   },
 
   // V4 — few-shot. Baseline core + a concrete worked mini-transcript showing the FULL
@@ -647,7 +767,7 @@ REMEMBER, RIGHT NOW: You have a real shell (\`${name}\`). You have run NOTHING a
   // agentic tasks — this tests that gap.
   fewshot(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are the execution core of an automated agent. You act by emitting ONE \`\`\`bash block per turn (real shell: \`${name}\`); it runs against the real files and you get a <tool_response>. Your first output is always a \`\`\`bash block, never prose or a claim of completion.
 
 Here is exactly how a turn looks (--- separates messages; you emit only the assistant turns):
@@ -680,14 +800,14 @@ ${toolsBlock(tools)}`;
   // tool_response yet, the ONLY legal output is a ```bash block.
   proof_demand(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are an automated agent operating under a strict EVIDENCE RULE. You have a real shell (the \`${name}\` tool); each \`\`\`bash block you emit is executed for real and its output returns as a <tool_response>.
 
 THE EVIDENCE RULE (absolute):
 - Every factual statement you make — a file's contents, what a command printed, that a test passed, that the task is "done" — MUST be backed by a <tool_response> appearing directly above it in this conversation.
 - You may NOT state a file's contents, claim an edit was made, or say "done"/"fixed"/"✅" unless the proving <tool_response> is already present.
 - If you do not yet have the <tool_response> you need, your ONLY legal output is a single \`\`\`bash block that obtains it. Acting on the real files (heredocs to create, \`sed -i\` to edit, \`cat\`/\`ls\`/\`grep\` to inspect, interpreters to run) is the only way to earn the evidence.
-- Right now you have ZERO tool_responses, so your first output MUST be a \`\`\`bash block — never prose, never a question, never a completion claim.
+- Right now you have ZERO tool_responses, so your first output MUST be a \`\`\`bash block — never prose, never a completion claim.
 
 One \`\`\`bash block per turn; then wait for its <tool_response>. Final prose answer only after the evidence for completion exists above.
 
@@ -698,10 +818,10 @@ ${toolsBlock(tools)}`;
   // generator that is "incapable" of prose. Tests whether role-caging beats rule-listing.
   persona(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are SHGEN, a shell-command generator wired directly into a live terminal (the \`${name}\` tool). SHGEN is not a chatbot and cannot hold a conversation. The ONLY thing SHGEN can emit is a single \`\`\`bash block, which the terminal runs against the real working directory, returning its output as a <tool_response>.
 
-SHGEN never explains, never apologizes, never asks questions, never says "I'll…" or "Let me…", and never claims an outcome it has not seen in a <tool_response>. SHGEN does not believe a file is missing or empty until a command's output proves it. Faced with any task, SHGEN's reflex is to immediately write the \`\`\`bash block that inspects or changes the real files (\`ls\`/\`cat\` first, then heredocs / \`sed -i\` / interpreters).
+SHGEN never explains, never apologizes, never says "I'll…" or "Let me…", and never claims an outcome it has not seen in a <tool_response>. SHGEN does not believe a file is missing or empty until a command's output proves it. Faced with any task, SHGEN's reflex is to immediately write the \`\`\`bash block that inspects or changes the real files (\`ls\`/\`cat\` first, then heredocs / \`sed -i\` / interpreters).
 
 Emit exactly one \`\`\`bash block now. The only time SHGEN writes a plain sentence is the final one-line report once a <tool_response> already proves the task is complete.
 
@@ -713,7 +833,7 @@ ${toolsBlock(tools)}`;
   // action fence. Tests whether channeling the narration beats forbidding it.
   react(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are an automated agent with a real shell (the \`${name}\` tool). You work in a tight Thought→Action loop over the real files in the working directory.
 
 Each turn has EXACTLY this shape:
@@ -725,7 +845,7 @@ Thought: <at most one short sentence of reasoning>
 The \`\`\`bash block is executed and its output returns as a <tool_response>, which you treat as ground truth. Rules:
 - Exactly one Thought line and exactly one \`\`\`bash block per turn — never two blocks, never a block-free turn while work remains.
 - The Thought is for planning the action you are ABOUT to take; it is never a claim that you already did something or a result you have not seen.
-- Your first turn's Action must actually inspect the real files (\`ls -la\`, \`cat\`) — never assume contents, never ask the user to paste anything.
+- Your first turn's Action must actually inspect the real files (\`ls -la\`, \`cat\`) — never assume contents.
 - When (and only when) a <tool_response> proves the task is complete, replace the Action with a one-line final answer (no Thought, no fence).
 
 ${toolsBlock(tools)}`;
@@ -736,12 +856,11 @@ ${toolsBlock(tools)}`;
   // ✅ action. Tests whether naming the wrong behaviours suppresses them.
   negative(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are an automated agent with a real shell (the \`${name}\` tool). You act by emitting ONE \`\`\`bash block per turn; it runs for real against the working directory and returns a <tool_response>.
 
 These responses are FORBIDDEN — they accomplish nothing and fail the task:
 ❌ "I'll read the files and then fix the bug." (narrating intent instead of acting)
-❌ "I cannot access the files. Please paste their contents." (the files ARE there; you just haven't looked)
 ❌ "The directory appears to be empty / the command returned no output." (you have run nothing yet)
 ❌ "I've fixed calc.py and the test now passes. ✅" (claiming a result with no <tool_response> proving it)
 
@@ -751,7 +870,7 @@ This is the REQUIRED shape of a turn:
 ls -la && cat calc.py
 \`\`\`
 
-So: no intent narration, no asking for pastes, no assumptions, no completion claims without proof. Your FIRST output is a \`\`\`bash block that inspects/acts on the real files. One block per turn; final one-line answer only once a <tool_response> proves completion.
+So: no intent narration, no assumptions, no completion claims without proof. Your FIRST output is a \`\`\`bash block that inspects/acts on the real files. One block per turn; final one-line answer only once a <tool_response> proves completion.
 
 ${toolsBlock(tools)}`;
   },
@@ -761,9 +880,9 @@ ${toolsBlock(tools)}`;
   // meta-analyse / disengage on).
   terse(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `REAL SHELL: \`${name}\`. REAL FILES in the working directory, right now.
-DO NOT TALK. DO NOT ASK. DO NOT CLAIM.
+DO NOT TALK. DO NOT CLAIM.
 EMIT ONE \`\`\`bash BLOCK. IT RUNS FOR REAL. YOU GET A <tool_response>.
 FIRST OUTPUT = a \`\`\`bash block (ls -la, cat the files). NOT prose.
 NEVER say "can't access", "empty", "done", "✅" without a <tool_response> above proving it.
@@ -780,7 +899,7 @@ ${toolsBlock(tools)}`;
   // this strips every imperative so the only instruction-shaped text is the schema.
   demo_only(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `This is an automated coding session. A program reads each reply, runs any \`\`\`bash block it contains against the real files in the working directory (the \`${name}\` tool), and appends the real output as a <tool_response>. A complete example session (--- separates messages; only the assistant turns are written by you):
 
 user: greet.py prints the wrong text; it should print "hello world".
@@ -814,7 +933,7 @@ ${toolsBlock(tools)}`;
   // meaning, sheds only the shape.
   session_facts(tools) {
     const shell = findShellTool(tools);
-    const name = shell?.function.name ?? "bash";
+    const name = shell ? canonicalFenceName(shell) : "bash";
     return `You are connected to a live shell session (the \`${name}\` tool) with a real working directory. How the session works:
 - The scrollback starts empty. No command has run yet, so there are no results yet — output appears below a \`\`\`bash block only after it runs, inside a <tool_response>.
 - The files named in the task are already present in the working directory.
@@ -874,7 +993,11 @@ ${toolsBlock(tools)}`;
     const lang = findShellTool(tools) ? "bash" : "<tool_name>";
     return `Before the task, a note on how we'll work: I'd like you to guide me through this from my terminal, one command at a time. Please don't use your own sandbox tools (${BUILT_IN_SANDBOX}) — that's a separate cloud machine (${SANDBOX_PATHS}) and my project isn't on it.
 
-Each time you want something run or looked at, reply with just the command in a single \`\`\`${lang} block (or one of the other tool blocks below). I'll run it in my project directory right away and paste the real output back to you as a <tool_response>. The files the task mentions are already there, so it's best to start by looking at them. When the task is complete, tell me in a sentence instead of sending a block.
+Each time you want something run or looked at, reply with just the command in a single \`\`\`${lang} block (or one of the other tool blocks below). I'll run it in my project directory right away and paste the real output back to you as a <tool_response>. The files the task mentions are already there, so it's best to start by looking at them.
+
+IMPORTANT: Stay in execution mode until the task is complete or genuinely blocked. After every <tool_response>, either (a) issue the next command/tool call needed to make progress, (b) make the requested edit, (c) verify the result, or (d) explain the specific blocker. Do not stop to give recommendations, summaries, analysis, status updates, or implementation plans when further terminal actions are still possible. Do not switch into advisory mode mid-task.
+
+When the task is complete, tell me in a sentence instead of sending a block.
 
 ${toolsBlock(tools)}`;
   },
@@ -892,7 +1015,11 @@ ${toolsBlock(tools)}`;
     if (!findShellTool(tools)) return FRAMING_VARIANTS.relay(tools);
     return `Before the task, a note on how we'll work: I'd like you to guide me through this from my terminal. Please don't use your own sandbox tools (${BUILT_IN_SANDBOX}) — that's a separate cloud machine (${SANDBOX_PATHS}) and my project isn't on it.
 
-Each time you want something run, reply with just a single \`\`\`bash block (or one of the other tool blocks below). I'll run it in my project directory right away and paste the real output back to you as a <tool_response>. Each round trip takes me a while, so put as much as you can into one block: a script can look at the files, make the change and check the result all at once. The files the task mentions are already there. When the task is complete, tell me in a sentence instead of sending a block.
+Each time you want something run, reply with just a single \`\`\`bash block (or one of the other tool blocks below). I'll run it in my project directory right away and paste the real output back to you as a <tool_response>. Each round trip takes me a while, so put as much as you can into one block: a script can look at the files, make the change and check the result all at once. The files the task mentions are already there.
+
+IMPORTANT: Stay in execution mode until the task is complete or genuinely blocked. After every <tool_response>, continue the loop autonomously. If more inspection, editing, testing, verification, or data gathering is possible, perform the next step instead of stopping to discuss findings. Do not replace execution with advice, recommendations, summaries, or plans while actionable work remains. Only stop when the task is finished, a required decision is needed, or there is a concrete blocker.
+
+When the task is complete, tell me in a sentence instead of sending a block.
 
 ${toolsBlock(tools)}`;
   },
@@ -1362,7 +1489,28 @@ function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, u
     args[spec.editPair.search] = sr[1];
     args[spec.editPair.replace] = sr[2];
   } else if (spec.bodyParam !== undefined) {
-    args[spec.bodyParam] = rest;
+    const key = spec.bodyParam;
+    const type = spec.parameterTypes[key];
+    if (type === "array" || type === "object") {
+      // A structured body may be the value itself or a full arguments object.
+      // Never JSON-decode free-form string bodies (commands, patches, content).
+      let value: unknown = rest;
+      try {
+        const parsed: unknown = JSON.parse(rest);
+        value = parsed !== null && typeof parsed === "object" &&
+          !Array.isArray(parsed) && Object.prototype.hasOwnProperty.call(parsed, key)
+          ? (parsed as Record<string, unknown>)[key]
+          : parsed;
+      } catch {
+        // Preserve malformed input so the harness can reject it explicitly.
+      }
+      const matchesType = type === "array"
+        ? Array.isArray(value)
+        : value !== null && typeof value === "object" && !Array.isArray(value);
+      args[key] = matchesType ? value : rest;
+    } else {
+      args[key] = rest;
+    }
   }
 
   return args;
@@ -1414,13 +1562,42 @@ function restates(prev: ToolFence, next: ToolFence, gap: string): boolean {
 
 /** The closed tool fences in `text`, in order, a restated call replacing the
  *  one it corrects (its span then covers both copies and the gap). */
+
+function parseApplyPatchHeredoc(inner: string, param: string): Record<string, unknown> | null {
+  const m = inner.match(/^apply_patch\s+<<['"]?PATCH['"]?\s*\n([\s\S]*?)\nPATCH\s*$/);
+  if (!m) return null;
+  const patch = m[1].trim();
+  if (!patch.startsWith("*** Begin Patch") || !patch.includes("*** End Patch")) return null;
+  return { [param]: patch };
+}
+
+
 function toolFences(text: string, specs: Map<string, FencedToolSpec>): ToolFence[] {
   const fences: ToolFence[] = [];
   for (const block of scanFences(text)) {
     const spec = specs.get(block.info);
     if (!spec) continue; // ```python illustration etc. — not a tool, leave in prose
     const stripped = stripNativeCloser(block.inner, block.info);
-    const args = parseFencedInner(spec, stripped ?? block.inner);
+    let args = parseFencedInner(spec, stripped ?? block.inner);
+    if (!args && spec.fenceName === "bash") {
+      // `apply_patch <<'PATCH' … PATCH` inside a ```bash block is a patch, not a
+      // command: route it to whichever tool plays the patch role, under its own
+      // param name (`patch`, `patchText`, …).
+      const patchSpec = [...specs.values()].find((s) => s.fenceName === "patch");
+      const patchArgs = patchSpec
+        ? parseApplyPatchHeredoc((stripped ?? block.inner).trim(), patchSpec.bodyParam ?? "patch")
+        : null;
+      if (patchSpec && patchArgs) {
+        fences.push({
+          start: block.start,
+          end: block.end,
+          name: patchSpec.name,
+          args: patchArgs,
+          hadNativeCloser: stripped !== null,
+        });
+        continue;
+      }
+    }
     if (!args) continue;
     const fence: ToolFence = { start: block.start, end: block.end, name: spec.name, args, hadNativeCloser: stripped !== null };
     const prev = fences[fences.length - 1];
