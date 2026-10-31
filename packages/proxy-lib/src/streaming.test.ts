@@ -542,6 +542,47 @@ describe("M365_AVOID_THROTTLING holds a turn it would have to wait too long for"
     scripted.queue = [];
   });
 
+  it("does not finish a stream with a persisted tool-access refusal", async () => {
+    scripted.result = null;
+    scripted.runs = 0;
+    scripted.queue = [
+      { fullText: "I can't access the files in this session. Please paste them here." },
+      { fullText: "I still cannot access the workspace or execute commands." },
+    ];
+    const tools = [{
+      type: "function",
+      function: {
+        name: "bash",
+        parameters: {
+          type: "object",
+          properties: { command: { type: "string" } },
+        },
+      },
+    }];
+    const body = ChatCompletionRequest.parse({
+      model: "claude-sonnet",
+      stream: true,
+      tools,
+      messages: [{ role: "user", content: "inspect the repository" }],
+    });
+    const response = await handleChatCompletion(body, new SessionPool());
+    const wire = await response.text();
+    const chunks = wire
+      .split("\n")
+      .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map(line => JSON.parse(line.slice(6)));
+    const content = chunks
+      .map(chunk => chunk.choices?.[0]?.delta?.content ?? "")
+      .join("");
+    const errors = chunks.map(chunk => chunk.error).filter(Boolean);
+    expect(scripted.runs).toBe(2);
+    expect(content).not.toContain("can't access");
+    expect(content).not.toContain("cannot access");
+    expect(errors).toHaveLength(1);
+    expect(errors[0].type).toBe("tool_access_confabulation");
+    scripted.queue = [];
+  });
+
   it("hands run() the same wait for its reconnect's turn (#77)", async () => {
     scripted.result = null;
     scripted.queue = [];
@@ -1379,7 +1420,9 @@ describe("local history continuity regressions", () => {
       { role: "tool", tool_call_id: call.tool_calls[0].id, content: "/project/parser" },
     ]);
     const sent = scripted.texts[scripted.texts.length - 1];
-    expect(sent).toContain("WORKSPACE_CONTEXT_INSERTION");
+    // Harness-owned system messages are replaced by the repo prompt, while
+    // conversation messages are replayed.
+    expect(sent).not.toContain("WORKSPACE_CONTEXT_INSERTION");
     expect(sent).toContain("TASK_CONTEXT_INSERTION");
   });
 
@@ -1669,10 +1712,10 @@ describe("workspace framing on continued tool turns", () => {
       );
       await post();
       expect(scripted.newConversations).toBe(0);
-      expect(scripted.texts[0]).toContain("WORKSPACE_REFRESH");
-      expect(scripted.texts[0]).toContain("My workflow preferences for this task:");
+      expect(scripted.texts[0]).not.toContain("WORKSPACE_REFRESH");
+      expect(scripted.texts[0]).toContain("Tool use is the default and text is the exception.");
       expect(scripted.texts[1]).not.toContain("WORKSPACE_REFRESH");
-      expect(scripted.texts[1]).not.toContain("My workflow preferences for this task:");
+      expect(scripted.texts[1]).not.toContain("Tool use is the default and text is the exception.");
       expect(scripted.texts[1]).not.toContain("Before the task, a note on how we'll work:");
       expect(scripted.texts[1]).toContain('<tool_response tool="bash"');
     } finally {
@@ -1701,7 +1744,7 @@ describe("RESTORECONTEXT", () => {
     return scripted.texts.at(-1)!;
   }
 
-  it("replays exactly the last 700 transcript lines and preserves current instructions", async () => {
+  it("replays all available transcript lines and preserves current instructions", async () => {
     const messages: any[] = [
       { role: "system", content: "CURRENT_WORKSPACE_RULES" },
       { role: "user", content: Array.from({ length: 900 }, (_, i) => `HISTORY_LINE_${i}`).join("\n") },
@@ -1712,15 +1755,16 @@ describe("RESTORECONTEXT", () => {
     const prompt = await post(new SessionPool(), messages);
     const recovered = prompt.split("BEGIN RECOVERED HISTORY\n")[1]
       .split("\nEND RECOVERED HISTORY")[0];
-    expect(recovered.split("\n")).toHaveLength(700);
-    expect(recovered).not.toContain("HISTORY_LINE_0\n");
+    expect(recovered.split("\n").length).toBeGreaterThanOrEqual(900);
+    expect(recovered).toContain("HISTORY_LINE_0");
     expect(recovered).toContain("HISTORY_LINE_899");
     expect(recovered).toContain("LAST_VERIFIED_STATE");
-    expect(prompt).toContain("CURRENT_WORKSPACE_RULES");
+    // Harness system messages are intentionally replaced by our prompt.
+    expect(prompt).not.toContain("CURRENT_WORKSPACE_RULES");
     expect(JSON.stringify(messages)).toBe(original);
   });
 
-  it("restores into a fresh upstream conversation and then continues that conversation normally", async () => {
+  it("replays context into the same upstream conversation and then continues normally", async () => {
     const pool = new SessionPool();
     const messages: any[] = [{ role: "user", content: "ORIGINAL_TASK_MARKER" }];
     await post(pool, messages);
@@ -1738,17 +1782,17 @@ describe("RESTORECONTEXT", () => {
     expect(prompt).toContain("pwd");
     expect(prompt).toContain("REAL_WORKSPACE_RESULT");
     expect(prompt).toContain("BEGIN RECOVERED HISTORY");
-    expect(scripted.newConversations).toBe(rotations + 1);
+    expect(scripted.newConversations).toBe(rotations);
     messages.push(
       { role: "assistant", content: "Context received." },
       { role: "user", content: "Continue normally." },
     );
     const next = await post(pool, messages);
     expect(next).not.toContain("BEGIN RECOVERED HISTORY");
-    expect(scripted.newConversations).toBe(rotations + 1);
+    expect(scripted.newConversations).toBe(rotations);
   });
 
-  it("preserves the task and latest steering when a long tool result fills the replay window", async () => {
+  it("preserves the complete task, steering and long tool output", async () => {
     const messages: any[] = [
       { role: "system", content: "CURRENT_WORKSPACE_RULES" },
       { role: "user", content: "ORIGINAL_TASK: repair context restoration, not the image viewer." },
@@ -1768,13 +1812,15 @@ describe("RESTORECONTEXT", () => {
       const prompt = await post(new SessionPool(), messages, stream);
       const recovered = prompt.split("BEGIN RECOVERED HISTORY\n")[1]
         .split("\nEND RECOVERED HISTORY")[0];
-      expect(recovered.split("\n")).toHaveLength(700);
-      expect(recovered).not.toContain("ORIGINAL_TASK:");
-      expect(recovered).not.toContain("LATEST_STEERING:");
+      expect(recovered.split("\n").length).toBeGreaterThanOrEqual(950);
+      expect(recovered).toContain("ORIGINAL_TASK:");
+      expect(recovered).toContain("LATEST_STEERING:");
+      expect(recovered).toContain("TOOL_OUTPUT_0");
+      expect(recovered).toContain("TOOL_OUTPUT_949");
       expect(prompt).toContain("ORIGINAL_TASK: repair context restoration, not the image viewer.");
       expect(prompt).toContain("LATEST_STEERING: preserve existing changes and do not implement PDF selection.");
-      expect(prompt).toContain("CURRENT_WORKSPACE_RULES");
-      expect(prompt).toContain("TOOL_OUTPUT_949");
+      // Harness system messages are intentionally replaced by our prompt.
+      expect(prompt).not.toContain("CURRENT_WORKSPACE_RULES");
       expect(JSON.stringify(messages)).toBe(original);
     }
   });
@@ -1906,18 +1952,19 @@ describe("synthetic proxy waiting indicator", () => {
         for (const [index, prompt] of scripted.texts.entries()) {
           if (model === "claude-sonnet" || index > 0) {
             expect(prompt).not.toContain("My workflow preferences for this task:");
-            expect(prompt).not.toContain("dedicated patch or editing tool");
+            if (index > 0) {
+              expect(prompt).not.toContain("Tool use is the default and text is the exception.");
+            }
             if (index > 0) {
               expect(prompt).not.toContain("Before the task, a note on how we'll work:");
             }
           } else {
-            expect(prompt).toContain("dedicated patch or editing tool");
-            expect(prompt).toContain("[descriptive label](https://example.com/path)");
-            expect(prompt).toContain("Keep sentence punctuation outside the Markdown link");
-            expect(prompt).toContain("not file contents, code examples, or tool arguments");
-            expect(prompt).toContain("Do not create .bak");
+            expect(prompt).toContain("Tool use is the default and text is the exception.");
+            expect(prompt).toContain("Never ask the user to paste files");
+            expect(prompt).toContain("Never claim that files, commands, tools, or workspace access are unavailable");
+            expect(prompt).toContain("Do not create `.bak`");
             expect(prompt).toContain("Keep shell output operational");
-            expect(prompt).toContain("final plain-text response outside any tool block");
+            expect(prompt).toContain("The final answer is the only turn without a block");
           }
         }
       }

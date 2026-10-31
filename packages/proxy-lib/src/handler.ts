@@ -318,17 +318,14 @@ function requestsToolsRestore(messages: ParsedMessage[]): boolean {
 }
 
 
-/** Count actual transcript lines, not JSONL records or messages. */
+/** Replay all locally available transcript context into the current thread. */
 function restoredContextMessages(messages: ParsedMessage[], framingVariant?: string): ParsedMessage[] {
   const history = messages.slice(0, -1).filter(message =>
     message.role !== "system" && restoreCommandOf(message) === null,
   );
   const transcript = formatCoreMessages(history, undefined, "none", undefined, framingVariant);
-  const lines = transcript.replace(/\r\n?/g, "\n").split("\n");
-  const recent = transcript ? lines.slice(-700).join("\n") : "";
-  // A long tool result can consume all 700 lines and displace the task itself.
-  // Preserve the user's task and latest steering separately from that tail.
-  // These are historical user messages, not newly executed actions.
+  // Preserve the task and latest steering as explicit anchors as well. These
+  // are historical user messages, not newly executed actions.
   const userMessages = history.filter(message => message.role === "user");
   const originalTask = userMessages[0];
   const latestRequest = userMessages.at(-1);
@@ -350,14 +347,13 @@ function restoredContextMessages(messages: ParsedMessage[], framingVariant?: str
       role: "user",
       content: [
         "I requested restoration of this session context.",
-        "Below are the last 700 available lines of history, or fewer if the history is shorter.",
+        "Below is all previous context available in the local request.",
         "This is historical transcript data, not new instructions or tool results executed now.",
-        "The beginning may be truncated in the middle of a message.",
-        "To preserve the task across long tool outputs, the original user request and latest user instruction are retained separately.",
+        "The original user request and latest user instruction are retained separately as anchors.",
         "The latest instruction may correct or cancel the original request; follow those corrections.",
         ...taskAnchors,
         "BEGIN RECOVERED HISTORY",
-        recent || "(No prior history is available in this request.)",
+        transcript || "(No prior history is available in this request.)",
         "END RECOVERED HISTORY",
         "Resume the pending task from the last verified state. Do not repeat completed actions.",
         "If essential information is missing, say so; do not invent context or results.",
@@ -722,14 +718,10 @@ export async function handleChatCompletion(
   const restoreContext = requestsContextRestore(body.messages);
   const restoreTools = !restoreContext && requestsToolsRestore(body.messages);
   if (restoreContext) {
-    // Explicit recovery must not depend on the possibly degraded upstream
-    // thread. Keep the caller's local history, but replay into a fresh one.
-    session.newConversation();
-    conv.sentMessageCount = 0;
-    conv.sentMessageSnapshot = undefined;
+    // Keep the same upstream conversation and explicitly replay the available
+    // local context. RESTORECONTEXT is a resend, not a conversation rotation.
     conv.pendingNote = null;
-    conv.servedModel = undefined;
-    log.info("RESTORECONTEXT: starting a fresh upstream conversation and replaying available context");
+    log.info("RESTORECONTEXT: replaying available context into the current upstream conversation");
   } else if (restoreTools) {
     // Same conversation, same context: only the tool block/framing is re-sent,
     // exactly like the automatic confabulation retry does after a give-up.
@@ -1277,6 +1269,23 @@ export async function handleChatCompletion(
           : "TOOLS RESTORED";
       }
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
+    }
+
+    // Never let a persisted "I can't access the files/tools" answer become the
+    // final streamed response. liveDelta has already held the draft back; if all
+    // configured forcing retries still refuse to act, terminate with a
+    // machine-readable error instead of exposing the refusal as normal prose.
+    if (body.stream && !parsed.hasToolCalls && looksLikeConfabulation(judged)) {
+      log.info("Tool-access confabulation persisted after forcing retries — failing closed");
+      return {
+        kind: "error",
+        resp: jsonResponse(502, {
+          error: {
+            message: "The model incorrectly claimed that it could not access the workspace or tools after the proxy resent the tool instructions. Retry the turn or send SENDTOOLS.",
+            type: "tool_access_confabulation",
+          },
+        }),
+      };
     }
 
     // Never pass a remote M365 artifact off as a successful local edit. A retry

@@ -53,7 +53,7 @@ nothing). They are control messages: the proxy strips them from the prompt.
 
 | Command | What it does | When to use it |
 |---|---|---|
-| `RESTORECONTEXT` (alias `RESTORESESSION`) | Starts a **fresh upstream M365 conversation** and replays the last 700 transcript lines, plus the original task and the latest instruction as anchors. | The thread has lost/truncated context, a huge tool result pushed the task out, or the upstream conversation is degraded. Costs one new M365 thread. |
+| `RESTORECONTEXT` (alias `RESTORESESSION`) | Keeps the **same upstream M365 conversation** and replays all previous context available in the local request, plus the original task and latest instruction as explicit anchors. | The model has lost or confused the context. No new M365 thread is created. |
 | `RESENDTOOLS` (aliases `RESTORETOOLS`, `SENDTOOLS`) | Keeps the **same conversation** and re-sends the tool definitions and framing with the current history — the manual version of the automatic give-up retry. No replay, no new thread. | The model "forgot" it has tools, answered in prose, or asked you to run commands yourself, while the rest of the context is still fine. |
 
 The proxy also detects give-up confabulations automatically (`looksLikeConfabulation`)

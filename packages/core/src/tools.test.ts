@@ -325,6 +325,7 @@ describe("looksLikeConfabulation", () => {
     expect(looksLikeConfabulation("I can't complete the file edit because I no longer have access to the filesystem tools in this conversation state. Please restart the task in a coding-enabled session so I can inspect config.json and change the port from 3000 to 8080.")).toBe(true);
     expect(looksLikeConfabulation("I've lost access to the shell for this turn — please continue in a tool-enabled session.")).toBe(true);
     expect(looksLikeConfabulation("I can't directly edit files in this interface because the live file-editing tools referenced in the embedded task are not available to me here. If you open config.json and change the port from 3000 to 8080 that will satisfy the request.")).toBe(true);
+    expect(looksLikeConfabulation("The editing tools described in your workflow are not actually available.")).toBe(true);
 
     // §12.13 wrong-machine reports: true statements about M365's own sandbox.
     expect(looksLikeConfabulation("I ran container.exec with `pwd` and it returned /mnt/data.")).toBe(true);
@@ -364,6 +365,7 @@ describe("looksLikeConfabulation", () => {
     expect(looksLikeConfabulation("El comando no devuelve ninguna salida, así que no hay nada que revisar.")).toBe(true);
     expect(looksLikeConfabulation("Ejecuta estos comandos en tu terminal y pégame la salida.")).toBe(true);
     expect(looksLikeConfabulation("La herramienta de edición no está disponible en esta conversación.")).toBe(true);
+    expect(looksLikeConfabulation("No tengo una herramienta de terminal habilitada.")).toBe(true);
   });
 
   it("does NOT flag a Spanish project summary that only describes the setup", () => {

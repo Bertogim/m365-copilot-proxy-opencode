@@ -329,6 +329,7 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   // "the live file-editing tools ... are not available to me here" (magic model, F12.11):
   // it claims its own tools are gone, then delegates the edit back to the user.
   /(?:tool|editor|shell|command|file-?editing)s?[^.\n]{0,40}\b(?:not\s+available|unavailable|aren.?t\s+available|isn.?t\s+available|are\s+not\s+accessible)/i,
+  /(?:editing|file-?editing|terminal|shell|command)\s+tools?[^.\n]{0,80}\b(?:not\s+actually\s+available|not\s+enabled|unavailable)/i,
   /(?:can.?t|cannot|not\s+able\s+to|unable\s+to)\s+(?:directly\s+)?(?:edit|modify|write\s+to|change|save|create|open)\s+(?:the\s+|any\s+|to\s+)?files?/i,
   /paste\s+(?:the\s+)?(?:contents?|files?|code|them)/i,
   /provide\s+(?:the\s+)?(?:contents?|files?)/i,
@@ -380,6 +381,7 @@ const CONFABULATION_PATTERNS: RegExp[] = [
   /\bno\s+(?:puedo|podr[eé]|soy\s+capaz\s+de|me\s+es\s+posible)\s+(?:[a-záéíóúñ]+\s+){0,2}(?:ejecutar|correr|lanzar|acceder|leer|escribir|crear|modificar|editar|guardar|listar|abrir|inspeccionar|obtener|descargar|instalar|interactuar|usar|ver(?:l[oa]s?)?\b)/i,
   /\bno\s+puedo[\s\S]{0,80}\bdesde\s+aqu[ií]/i,                                                 // "no puedo ejecutarlos yo desde aquí"
   /\b(?:no\s+tengo|no\s+dispongo\s+de|carezco\s+de)\s+(?:acceso|permiso|capacidad|posibilidad|habilidad|herramientas?)\b/i,
+  /\bno\s+tengo\s+(?:una?|ninguna?)\s+(?:herramienta|terminal|consola)[^.\n]{0,40}\b(?:habilitada|habilitado|disponible|activa|activo)\b/i,
   /\bsin\s+acceso\s+(?:a|al|a\s+la|a\s+los|a\s+las)\b/i,
   /\b(?:puedo|podr[ií]a|te\s+puedo)\s+(?:darte|ponerte|pasarte|proporcionarte|ofrecerte|prepararte|dejarte)\s+(?:los\s+|unas?\s+)?(?:comandos?|scripts?|instrucciones|pasos)\b/i,
   /\b(?:te\s+)?(?:doy|dejo|paso|pongo)\s+(?:los\s+|unas?\s+)?comandos?\b/i,
