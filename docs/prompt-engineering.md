@@ -144,6 +144,32 @@ one script can finish; fix-bug and config edits barely move. **And batching need
 read-only toolset, "a script can look at the files…" made Sonnet 4.6 announce it had only its own
 sandbox tools (3/7 vs relay 6/6, H25b), so `relay_batch` is plain relay when there is no shell tool.
 
+## The system slot (`opencode-system.md`)
+
+The per-request framing above is one lever; the single system message we do send
+(`packages/prompts/opencode-system.md`, the harness's own system/developer text is dropped) is the
+other. It is not free of contradictions to trip over:
+
+- **One action per turn ≠ one block per message.** The file used to say "exactly ONE fenced block
+  per turn" *and* "send several patches in one message", plus "verify after every change" *and*
+  "don't loop edit → check". A model that reads both hedges into chat. State the loop once
+  (inspect → change → verify → continue), allow several small blocks in one message for changes
+  you already know, and ask for **one** verification pass at the end. Note the proxy still collapses
+  a multi-call turn to its first call unless `M365_ALLOW_MULTI_TOOL` is set, so batching is a
+  prompt-side saving, not a guarantee.
+- **Name the failure shape instead of raising the volume.** "Chat mode" is listed as concrete
+  replies ("I'll start by…", asking permission for work already requested, pasting a diff in prose,
+  claiming a result with no `<tool_response>`) rather than as more ALL-CAPS pressure — `Disengaged`
+  keys on jailbreak shape, not on how strongly we mean it (hyp F10).
+- **"Average commands" are a context bug.** Placeholder paths (`/path/to/project`, `<file>`) and
+  guesses (`npm test` before reading the manifest) come from acting before inspecting, so the
+  context-first rule is stated with the command rules ("real paths from output you just saw").
+
+Unmeasured as a framing lever (the 8 wording-only variants that moved nothing were per-request
+behavioural rewrites, not this file). Treat the above as the contract to keep coherent, not as a
+scored win; if you change it, run the bench and log the result in
+[`hypotheses.md`](hypotheses.md).
+
 ## What does NOT work (confirmed dead-ends — don't re-litigate)
 
 - **Wording-only per-request variants.** 8 behavioural-prompt rewrites (alone /
