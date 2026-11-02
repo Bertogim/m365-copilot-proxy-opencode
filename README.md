@@ -125,6 +125,15 @@ export M365_SYSTEM_PROMPT=/path/to/file.md  # any file you want to edit
 export M365_SYSTEM_PROMPT=0                 # off: pass the harness prompt through
 ```
 
+To restore the default behaviour after disabling it:
+
+```sh
+unset M365_SYSTEM_PROMPT
+```
+
+When `M365_SYSTEM_PROMPT` is unset, the proxy automatically uses
+`packages/prompts/opencode-system.md` and keeps the system-prompt filter enabled.
+
 The prompt lives in [`packages/prompts/opencode-system.md`](packages/prompts/opencode-system.md) as
 plain Markdown: edit it and restart the proxy. The filter itself is
 `packages/proxy-lib/src/system-filter.ts` (`stripHarnessPrompt` / `applySystemPrompt`);

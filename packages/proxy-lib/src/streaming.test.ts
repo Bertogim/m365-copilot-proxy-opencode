@@ -1713,7 +1713,7 @@ describe("workspace framing on continued tool turns", () => {
       await post();
       expect(scripted.newConversations).toBe(0);
       expect(scripted.texts[0]).not.toContain("WORKSPACE_REFRESH");
-      expect(scripted.texts[0]).toContain("Tool use is the default and text is the exception.");
+      expect(scripted.texts[0]).toContain("Before the task, a note on how we\'ll work:");
       expect(scripted.texts[1]).not.toContain("WORKSPACE_REFRESH");
       expect(scripted.texts[1]).not.toContain("Tool use is the default and text is the exception.");
       expect(scripted.texts[1]).not.toContain("Before the task, a note on how we'll work:");
@@ -1959,9 +1959,9 @@ describe("synthetic proxy waiting indicator", () => {
               expect(prompt).not.toContain("Before the task, a note on how we'll work:");
             }
           } else {
-            expect(prompt).toContain("Tool use is the default and text is the exception.");
-            expect(prompt).toContain("Never ask the user to paste files");
-            expect(prompt).toContain("Never claim that files, commands, tools, or workspace access are unavailable");
+            expect(prompt).toContain("Before the task, a note on how we\'ll work:");
+            expect(prompt).toContain("You are the execution core of an automated coding agent");
+            expect(prompt).toContain("Never claim a command returned no output");
             expect(prompt).toContain("Do not create `.bak`");
             expect(prompt).toContain("Keep shell output operational");
             expect(prompt).toContain("The final answer is the only turn without a block");

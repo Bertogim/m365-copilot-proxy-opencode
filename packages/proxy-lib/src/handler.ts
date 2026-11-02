@@ -1245,7 +1245,9 @@ export async function handleChatCompletion(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
-      const confab = looksLikeConfabulation(judged);
+      const confab = (process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "1") === "1"
+        ? false
+        : looksLikeConfabulation(judged);
       const remoteArtifact = looksLikeRemoteArtifactCompletion(parsed.textContent);
       const halluc = !everActed && looksLikeHallucinatedCompletion(judged);
       if (!confab && !remoteArtifact && !halluc) break;
@@ -1275,7 +1277,12 @@ export async function handleChatCompletion(
     // final streamed response. liveDelta has already held the draft back; if all
     // configured forcing retries still refuse to act, terminate with a
     // machine-readable error instead of exposing the refusal as normal prose.
-    if (body.stream && !parsed.hasToolCalls && looksLikeConfabulation(judged)) {
+    if (
+      (process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "1") !== "1" &&
+      body.stream &&
+      !parsed.hasToolCalls &&
+      looksLikeConfabulation(judged)
+    ) {
       log.info("Tool-access confabulation persisted after forcing retries — failing closed");
       return {
         kind: "error",
@@ -1547,7 +1554,8 @@ export async function handleChatCompletion(
         // Tool-mode retries may replace a refusal or a fabricated completion.
         // Do not expose such a draft before the existing checks have judged it.
         if (hasTools && (
-          looksLikeConfabulation(pending) ||
+          ((process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "1") !== "1" &&
+            looksLikeConfabulation(pending)) ||
           (!streamEverActed && looksLikeHallucinatedCompletion(pending)) ||
           looksLikeRemoteArtifactCompletion(pending)
         )) {

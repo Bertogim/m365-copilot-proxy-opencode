@@ -287,4 +287,68 @@ describe.skipIf(!OPENCODE)("real opencode -> fake proxy (filter out)", () => {
     },
     180_000,
   );
+
+  it(
+    "captures a real OpenCode title request",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "m365-title-"));
+      dirs.push(dir);
+      const { server, port, captured } = await startFakeProxy(dir);
+      try {
+        const config = {
+          $schema: "https://opencode.ai/config.json",
+          model: "m365/gpt-6.1-sol",
+          provider: {
+            m365: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Fake M365",
+              options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "test" },
+              models: { "gpt-6.1-sol": { name: "Fake" } },
+            },
+          },
+        };
+
+        const env = {
+          ...process.env,
+          HOME: dir,
+          XDG_DATA_HOME: join(dir, "data"),
+          XDG_CONFIG_HOME: join(dir, "config"),
+          XDG_CACHE_HOME: join(dir, "cache"),
+          XDG_STATE_HOME: join(dir, "state"),
+          OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
+          OPENCODE_DB: join(dir, "db.sqlite"),
+          OPENCODE_DISABLE_MODELS_FETCH: "1",
+          OPENCODE_DISABLE_AUTOUPDATE: "1",
+          OPENCODE_DISABLE_SHARE: "1",
+          CI: "1",
+        };
+
+        const child = spawn(OPENCODE!, ["run", "--standalone", "one two three four five six seven eight nine ten"], {
+          cwd: dir,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+        await new Promise((resolve) => child.on("exit", resolve));
+
+        const title = captured.get("title");
+        expect(title).toBeTruthy();
+        const wire = JSON.stringify(title!.raw.messages);
+        expect(wire).toContain("You are a title generator");
+        expect(wire).toContain("Generate a brief title");
+        expect(wire).toContain("one two three four five six seven eight nine ten");
+
+        const user = title!.raw.messages.find((m) => m.role === "user");
+        const text = String(user?.content ?? "").replace(/^["']|["']$/g, "");
+        const words = text.split(/\s+/).filter(Boolean);
+        expect(words.slice(0, 5).join(" ") + (words.length > 5 ? "..." : "")).toBe(
+          "one two three four five...",
+        );
+      } finally {
+        server.close();
+      }
+    },
+    180_000,
+  );
+
 });
