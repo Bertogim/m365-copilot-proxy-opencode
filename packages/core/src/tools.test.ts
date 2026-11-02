@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseToolCalls, formatToolDefinitions, looksLikeConfabulation, looksLikeHallucinatedCompletion, looksLikeRemoteArtifactCompletion, isProseDocument } from "./tools.js";
+import { parseToolCalls, formatToolDefinitions, formatToolResponse, looksLikeConfabulation, looksLikeHallucinatedCompletion, looksLikeRemoteArtifactCompletion, isProseDocument } from "./tools.js";
 import type { ToolDef } from "./tools.js";
 
 describe("parseToolCalls", () => {
@@ -845,5 +845,66 @@ When you create a worktree outside the current working directory, consider using
     } finally {
       delete process.env.M365_OPENCODE_TOOLS;
     }
+  });
+});
+
+describe("formatToolResponse question schema recovery", () => {
+  const history = [
+    {
+      role: "assistant",
+      tool_calls: [
+        {
+          id: "call_question",
+          function: { name: "question", arguments: JSON.stringify({ questions: "¿Sigo?" }) },
+        },
+      ],
+    },
+  ];
+
+  it("appends the question contract after a rejected question call", () => {
+    const out = formatToolResponse(
+      {
+        role: "tool",
+        tool_call_id: "call_question",
+        content: 'Invalid arguments for tool "question":\n- questions: Expected array',
+      },
+      history,
+    );
+
+    expect(out).toContain('tool="question"');
+    expect(out).toContain("questions: Expected array");
+    expect(out).toContain("must always be an array of question objects");
+    expect(out).toContain('"questions": [');
+    expect(out.indexOf("Expected array")).toBeLessThan(
+      out.indexOf("must always be an array of question objects"),
+    );
+  });
+
+  it("leaves a normal question result alone", () => {
+    const out = formatToolResponse(
+      {
+        role: "tool",
+        tool_call_id: "call_question",
+        content: "The user answered: sí",
+      },
+      history,
+    );
+
+    expect(out).toContain("The user answered: sí");
+    expect(out).not.toContain("must always be an array of question objects");
+  });
+
+  it("does not attach the question contract to another tool's argument error", () => {
+    const out = formatToolResponse(
+      {
+        role: "tool",
+        name: "patch",
+        content: 'Invalid arguments for tool "patch":\n- patchText: Required',
+      },
+      [],
+    );
+
+    expect(out).toContain("patchText: Required");
+    expect(out).not.toContain("must always be an array of question objects");
   });
 });

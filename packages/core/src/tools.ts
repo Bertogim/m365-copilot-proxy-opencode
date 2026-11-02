@@ -1,4 +1,5 @@
 import { createLogger } from "./log.js";
+import { readPromptFile } from "./prompt-file.js";
 import {
   buildSpecMap,
   currentFramingVariant,
@@ -126,6 +127,13 @@ function toolCallSummary(rawArgs: string): string {
   return primary.replace(/\s+/g, " ").replace(/"/g, "'").trim().slice(0, 100);
 }
 
+/** Harnesses that validate tool arguments before running the call report the
+ *  failure as the tool result. The `question` schema is the one models get
+ *  wrong in the same way (a string where an array is required), so it gets the
+ *  contract re-sent next to the error. */
+const QUESTION_TOOL_NAME = /^(question|ask_user|ask)$/i;
+const INVALID_TOOL_ARGUMENTS = /invalid arguments for tool|questions\s*:\s*expected\s+array/i;
+
 /** One tool result as the model is meant to read it: named for the call that
  *  produced it, with that call's command. Without this the result is labelled
  *  "unknown" and the model misreads it — observed: it ran `ls`, saw `README.md`,
@@ -148,7 +156,17 @@ export function formatToolResponse(m: Message, history: Message[]): string {
   // Show the command/args that produced this output so the model reads it in
   // context (a directory listing vs file contents vs a command's stdout).
   const cmdAttr = meta?.summary ? ` command="${meta.summary}"` : "";
-  return `<tool_response tool="${name}"${cmdAttr}>\n${getMessageContent(m)}\n</tool_response>`;
+  const content = getMessageContent(m);
+  const rendered = `<tool_response tool="${name}"${cmdAttr}>\n${content}\n</tool_response>`;
+
+  // A rejected `question` call arrives as a tool result ("Invalid arguments for
+  // tool \"question\": - questions: Expected array"). The schema lives far away
+  // in the system prompt, and a model that just wrote a string repeats the same
+  // mistake. Put the contract right next to the failure so the retry sees it.
+  if (QUESTION_TOOL_NAME.test(name) && INVALID_TOOL_ARGUMENTS.test(content)) {
+    return `${rendered}\n\n${readPromptFile("question-note.md")}`;
+  }
+  return rendered;
 }
 
 /**
