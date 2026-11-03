@@ -87,4 +87,5 @@ The separate title request OpenCode sends is answered locally and uses no file.
 | `M365_FRAMING_VARIANT` | Force one framing for every request. |
 | `M365_FRAMING_FILE` | File whose first line names the framing; read per request, for A/B sweeps without a restart. |
 | `M365_NO_CONFAB_RETRY`, `M365_CONFAB_RETRIES` | Disable / count the nudge retries. |
+| `M365_DISABLE_TOOL_ACCESS_CONFAB` | Set to `1` to disable only the default detection and automatic tool-instruction resend for false "I can't access the files/tools" responses. Other nudge retries remain enabled. |
 | `M365_NO_TURN_REMINDER` | Drop the per-turn reminder on delta turns. |

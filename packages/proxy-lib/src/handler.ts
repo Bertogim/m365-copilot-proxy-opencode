@@ -1319,7 +1319,7 @@ export async function handleChatCompletion(
       (m) => m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length > 0,
     );
     for (let attempt = 0; attempt < maxConfabRetries && !parsed.hasToolCalls; attempt++) {
-      const confab = (process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "1") === "1"
+      const confab = (process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "0") === "1"
         ? false
         : looksLikeConfabulation(judged);
       const remoteArtifact = looksLikeRemoteArtifactCompletion(parsed.textContent);
@@ -1368,7 +1368,7 @@ export async function handleChatCompletion(
     // configured forcing retries still refuse to act, terminate with a
     // machine-readable error instead of exposing the refusal as normal prose.
     if (
-      (process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "1") !== "1" &&
+      (process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "0") !== "1" &&
       body.stream &&
       !parsed.hasToolCalls &&
       looksLikeConfabulation(judged)
@@ -1644,7 +1644,7 @@ export async function handleChatCompletion(
         // Tool-mode retries may replace a refusal or a fabricated completion.
         // Do not expose such a draft before the existing checks have judged it.
         if (hasTools && (
-          ((process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "1") !== "1" &&
+          ((process.env.M365_DISABLE_TOOL_ACCESS_CONFAB ?? "0") !== "1" &&
             looksLikeConfabulation(pending)) ||
           (!streamEverActed && looksLikeHallucinatedCompletion(pending)) ||
           looksLikeRemoteArtifactCompletion(pending)
