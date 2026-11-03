@@ -1,0 +1,1 @@
+Reminder: when you need to act, reply with exactly one ```bash, ```question, or ```patch block, and I will execute it myself in the terminal. When the task is complete, reply with the final summary as plain text, without a tool block.

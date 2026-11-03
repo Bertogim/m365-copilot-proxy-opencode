@@ -28,13 +28,16 @@ that fires: re-capture the prompt (fake proxy + `opencode run --standalone`), up
 | `framing/<variant>.md` | Behavioural wrapper injected into the user turn, around the fenced tool instructions. | Every tool request, **one** variant only. Chosen by `M365_FRAMING_FILE` (first line of a control file) > `M365_FRAMING_VARIANT` > per-model default. See the table below. |
 | `agent-instructions.md` | Format contract of the Copilot Studio tool agent. | Server-side: baked into the bot when it is provisioned (`m365-tool-agent-<sha256[:8]>`), on tool requests whose tone uses the agent. Not part of the message text. |
 | `question-note.md` | The `question` tool schema, with free-form and multiple-choice examples. | Appended right after a `question` tool result that reports `Invalid arguments for tool`, so the retry sees the array contract next to the failure (`formatToolResponse`). |
+| `patch-note.md` | The required `patch` block format and retry guidance. | On every failed patch, the proxy checks the previous failed patch. It appends the reminder only if at least 10 proxy calls have elapsed since that failure. The initial request counts as call 1. |
 | `nudges/confab.md` | "The files are there; you have run nothing — emit one ```bash block." | Retry after a turn-1 confabulation (model asks to paste files / claims no output) with no tool call. |
 | `nudges/midtask.md` | Same, but mid-task (a tool already ran): "tools work, continue with the next step." | Retry when the model confabulates **after** it has already acted. |
 | `nudges/hallucination.md` | "You did not actually do that; nothing changed on disk." | Retry when the model claims a completion it never performed (no tool call ever made). |
 | `nudges/remote-artifact.md` | "That patch/link only exists in M365's remote sandbox; edit the local file." | Retry when the model returns a `sandbox:/mnt/data/...` artifact or Teams link instead of a local edit. |
 | `nudges/tools-resend.md` | Re-sends the framing + tool block with a "continue" nudge. | The `RESENDTOOLS` / `RESTORETOOLS` / `SENDTOOLS` recovery command. |
 | `nudges/turn-reminder.md` | One-line "act, don't chat" reminder: one block, `question` for decisions, `patch` for file changes. | Prepended to **every delta turn** (continuations, where only the new messages are sent and the framing is only server-side). `M365_NO_TURN_REMINDER=1` disables it. |
+| `nudges/periodic-tool-reminder.md` | Reminds the model that the user personally executes one `bash`, `question`, or `patch` block, while completed tasks end in plain text. | Prepended every 15th proxy call. The initial request counts as call 1. |
 | `nudges/continue.md` | Literally "Please continue." | A turn with no new content (retry mode); with tools it is wrapped by `toolNudge` so the framing goes with it. |
+| `nudges/noop-shell.md` | Tells the model not to finish through an `echo`, `true`, or `false` shell call. | One same-conversation retry when the response contains only such a shell command. Completed work must be summarized as plain text; unfinished work must continue with a substantive tool call. |
 
 All nudges are one-shot retries (`M365_NO_CONFAB_RETRY` disables them,
 `M365_CONFAB_RETRIES` sets the count). A normal first message uses none of them.

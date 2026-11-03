@@ -249,6 +249,10 @@ const REMOTE_ARTIFACT_FORCE_PROMPT = readPromptFile("nudges/remote-artifact.md")
 
 const CONTINUE_PROMPT = readPromptFile("nudges/continue.md");
 
+const NOOP_SHELL_PROMPT = readPromptFile("nudges/noop-shell.md");
+
+const PERIODIC_TOOL_REMINDER = readPromptFile("nudges/periodic-tool-reminder.md");
+
 // Continuations send only the new messages (M365 keeps the framing server-side),
 // so the model loses the "act with a block" pressure exactly when it matters.
 // A one-line reminder on every delta turn keeps tool use the default.
@@ -417,6 +421,8 @@ interface ConversationState {
   /** Sent ahead of the next tool result when the proxy executed less than the
    *  model wrote last turn (see executedOnlyFirstNote). */
   pendingNote: string | null;
+  /** Proxy-call ordinal of the previous failed patch. */
+  lastPatchFailureCall: number | null;
   /** The model that last answered in this conversation. A different one (the
    *  Opus fallback, #18) can't continue the M365 conversation — it may need
    *  another scenario — so it starts a fresh one with the full history. */
@@ -498,6 +504,7 @@ export class SessionPool {
         existing.sentMessageCount = 0;
         existing.sentMessageSnapshot = undefined;
         existing.pendingNote = null;
+        existing.lastPatchFailureCall = null;
       }
       existing.lastAccessedAt = Date.now();
       return existing;
@@ -509,6 +516,7 @@ export class SessionPool {
       session: new ModelSession(this.sessionOptions),
       sentMessageCount: 0,
       pendingNote: null,
+      lastPatchFailureCall: null,
       lastAccessedAt: Date.now(),
     };
     this.conversations.set(fingerprint, state);
@@ -606,6 +614,60 @@ export function formatDeltaMessages(messages: ParsedMessage[], history: ParsedMe
     }
   }
   return parts.join("\n\n");
+}
+
+const PATCH_TOOL_NAME = /^(patch|apply_patch|apply_diff)$/i;
+const PATCH_FAILURE = /\b(?:failed|failure|error|invalid|rejected|could not|cannot|unable|does not apply|did not apply|invalid context|context mismatch)\b/i;
+const SHELL_TOOL_NAME = /^(?:bash|shell|sh|zsh|run|exec|execute|command|cmd|terminal|run_command|run_terminal_cmd|execute_command|execute_bash|shell_exec|system)$/i;
+
+function toolCallForResult(message: ParsedMessage, history: ParsedMessage[]) {
+  if (!message.tool_call_id) return undefined;
+  for (const candidate of history) {
+    const call = candidate.role === "assistant"
+      ? candidate.tool_calls?.find(item => item.id === message.tool_call_id)
+      : undefined;
+    if (call) return call;
+  }
+  return undefined;
+}
+
+function hasFailedPatchResult(messages: ParsedMessage[], history: ParsedMessage[]): boolean {
+  return messages.some(message => {
+    if (message.role !== "tool") return false;
+    const call = toolCallForResult(message, history);
+    const name = message.name || call?.function.name || "";
+    return PATCH_TOOL_NAME.test(name) && PATCH_FAILURE.test(getMessageContent(message));
+  });
+}
+
+function proxyCallOrdinal(messages: ParsedMessage[]): number {
+  return 1 + messages.filter(message => message.role === "assistant").length;
+}
+
+export function patchReminderDue(lastFailureCall: number | null, currentCall: number): boolean {
+  return lastFailureCall === null || currentCall - lastFailureCall >= 10;
+}
+
+export function periodicToolReminderDue(currentCall: number): boolean {
+  return currentCall > 0 && currentCall % 15 === 0;
+}
+
+function isOnlyNoopShellCall(call: ReturnType<typeof parseToolCalls>["toolCalls"][number]): boolean {
+  if (!SHELL_TOOL_NAME.test(call.function.name)) return false;
+  let command = "";
+  try {
+    const args = JSON.parse(call.function.arguments || "{}");
+    command = String(args.command ?? args.cmd ?? args.script ?? "");
+  } catch {
+    return false;
+  }
+  const value = command.trim();
+  if (!value) return false;
+  const commands = value.split(/\s*(?:\r?\n|;|&&|\|\|)\s*/).filter(Boolean);
+  return commands.length > 0 && commands.every(command =>
+    /^(?:true|false)$/.test(command) ||
+    /^echo(?:\s+(?:"(?:[^"\\]|\\.)*"|'[^']*'|[A-Za-z0-9_.,:/@%+=-]+))*\s*$/.test(command),
+  );
 }
 
 // --- Main handler ---
@@ -840,6 +902,18 @@ export async function handleChatCompletion(
       // The upstream conversation retains its initial framing, tool schemas
       // and workflow preferences. Send only new messages on continuations.
       text = TURN_REMINDER ? `${TURN_REMINDER}\n\n${delta}` : delta;
+      const callOrdinal = proxyCallOrdinal(body.messages);
+      if (periodicToolReminderDue(callOrdinal)) {
+        text = `${PERIODIC_TOOL_REMINDER}\n\n${text}`;
+        log.info(`Prepended periodic tool reminder on proxy call ${callOrdinal}`);
+      }
+      if (hasFailedPatchResult(newMessages, body.messages)) {
+        if (patchReminderDue(conv.lastPatchFailureCall, callOrdinal)) {
+          text = `${text}\n\n${readPromptFile("patch-note.md")}`;
+          log.info(`Appended patch-format reminder on proxy call ${callOrdinal}`);
+        }
+        conv.lastPatchFailureCall = callOrdinal;
+      }
       // Only a tool result is the thing the note corrects the model about.
       if (conv.pendingNote && newMessages.some((m) => m.role === "tool")) {
         text = `${conv.pendingNote}\n\n${text}`;
@@ -1271,6 +1345,22 @@ export async function handleChatCompletion(
           : "TOOLS RESTORED";
       }
       log.info(`After forcing retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
+    }
+
+    if (
+      parsed.hasToolCalls &&
+      parsed.toolCalls.length === 1 &&
+      isOnlyNoopShellCall(parsed.toolCalls[0])
+    ) {
+      log.info("Echo/true/false-only shell call detected; requesting final text or a substantive action");
+      text = toolNudge(NOOP_SHELL_PROMPT);
+      const retry = await runBuffered();
+      if ("error" in retry) return { kind: "error", resp: retry.error };
+      conv.sentMessageCount = body.messages.length;
+      conv.sentMessageSnapshot = body.messages.map(messageSnapshot);
+      fullText = stopAtFabricatedResult(retry.fullText);
+      ({ parsed, judged } = parseReply(fullText, body.tools));
+      log.info(`After no-op shell retry: hasToolCalls=${parsed.hasToolCalls}, count=${parsed.toolCalls.length}`);
     }
 
     // Never let a persisted "I can't access the files/tools" answer become the

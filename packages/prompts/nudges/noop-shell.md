@@ -1,0 +1,1 @@
+The shell command you attempted contains only `echo`, `true`, or `false`. Do not use a tool call to narrate progress, report completion, or end the conversation. If the task is complete, return the final summary as plain text with no fenced block. If work remains, emit exactly one substantive tool block that advances or verifies the task.

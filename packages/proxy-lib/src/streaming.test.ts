@@ -100,7 +100,13 @@ vi.mock("@m365-copilot/core", async (importActual) => {
 /** Which fake ModelSession (by creation order) served every run() call, in order. */
 const servedBy: number[] = [];
 
-const { handleChatCompletion, SessionPool, ChatCompletionRequest } = await import("./index.js");
+const {
+  handleChatCompletion,
+  SessionPool,
+  ChatCompletionRequest,
+  patchReminderDue,
+  periodicToolReminderDue,
+} = await import("./index.js");
 const { resetAgentRoutes, resetPriorityAccessState, TurnBudgetHold } = await import("@m365-copilot/core");
 
 // The proxy remembers a priority-access wall for the process (until the reset);
@@ -869,6 +875,114 @@ describe("follow-up turns and give-ups (Windows / pi, measured)", () => {
     expect(m.tool_calls).toBeUndefined();
     expect(m.content).toContain("If you can't access the API");
     scripted.queue = [];
+  });
+});
+
+describe("failed patch reminders and no-op shell completion attempts", () => {
+  const shellTools = [{
+    type: "function",
+    function: {
+      name: "bash",
+      parameters: { type: "object", properties: { command: { type: "string" } } },
+    },
+  }];
+  const patchTools = [{
+    type: "function",
+    function: {
+      name: "patch",
+      parameters: { type: "object", properties: { patchText: { type: "string" } } },
+    },
+  }];
+
+  afterEach(() => {
+    scripted.queue = [];
+    scripted.result = null;
+    scripted.texts = [];
+  });
+
+  it("counts from the previous failed patch, with the initial request as call 1", () => {
+    expect(patchReminderDue(null, 2)).toBe(true);
+    expect(patchReminderDue(2, 11)).toBe(false);
+    expect(patchReminderDue(2, 12)).toBe(true);
+    expect(patchReminderDue(11, 12)).toBe(false);
+  });
+
+  it("appends the patch format after a failed patch result", async () => {
+    scripted.queue = [
+      { fullText: "```patch\n*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch\n```" },
+      { fullText: "I will inspect the current file before retrying." },
+    ];
+    const pool = new SessionPool();
+    const messages: any[] = [{ role: "user", content: `patch reminder ${Math.random()}` }];
+    const firstResponse = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-5.6-think-deeper",
+      stream: false,
+      tools: patchTools,
+      messages,
+    }), pool);
+    const first = (await firstResponse.json()).choices[0].message;
+    messages.push(
+      { role: "assistant", content: null, tool_calls: first.tool_calls },
+      {
+        role: "tool",
+        tool_call_id: first.tool_calls[0].id,
+        content: "patch verification failed: invalid context",
+      },
+    );
+    await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-5.6-think-deeper",
+      stream: false,
+      tools: patchTools,
+      messages,
+    }), pool);
+    expect(scripted.texts[1]).toContain("# Patch tool");
+    expect(scripted.texts[1]).toContain("*** Begin Patch");
+    expect(scripted.texts[1]).toContain("*** End Patch");
+    expect(scripted.texts[1]).not.toContain("--- a/");
+  });
+
+  for (const command of ['echo "Done"', "true", "false", "echo done\ntrue", "echo done && true"]) {
+    it(`requests final prose instead of executing ${JSON.stringify(command)}`, async () => {
+      scripted.queue = [
+        { fullText: `\`\`\`bash\n${command}\n\`\`\`` },
+        { fullText: "Implemented the requested change and verified the result." },
+      ];
+      const response = await handleChatCompletion(ChatCompletionRequest.parse({
+        model: "gpt-5.6-think-deeper",
+        stream: false,
+        tools: shellTools,
+        messages: [{ role: "user", content: `finish ${Math.random()}` }],
+      }), new SessionPool());
+      const message = (await response.json()).choices[0].message;
+      expect(scripted.texts).toHaveLength(2);
+      expect(scripted.texts[1]).toContain("return the final summary as plain text");
+      expect(message.tool_calls).toBeUndefined();
+      expect(message.content).toContain("Implemented the requested change");
+    });
+  }
+
+  it("does not intercept a substantive shell command", async () => {
+    scripted.queue = [{ fullText: "```bash\nnpm test\n```" }];
+    const response = await handleChatCompletion(ChatCompletionRequest.parse({
+      model: "gpt-5.6-think-deeper",
+      stream: false,
+      tools: shellTools,
+      messages: [{ role: "user", content: `verify ${Math.random()}` }],
+    }), new SessionPool());
+    const message = (await response.json()).choices[0].message;
+    expect(scripted.texts).toHaveLength(1);
+    expect(JSON.parse(message.tool_calls[0].function.arguments).command).toBe("npm test");
+  });
+});
+
+describe("periodic tool reminder", () => {
+  it("runs every 15 calls with the initial request counted as call 1", () => {
+    expect(periodicToolReminderDue(1)).toBe(false);
+    expect(periodicToolReminderDue(14)).toBe(false);
+    expect(periodicToolReminderDue(15)).toBe(true);
+    expect(periodicToolReminderDue(16)).toBe(false);
+    expect(periodicToolReminderDue(29)).toBe(false);
+    expect(periodicToolReminderDue(30)).toBe(true);
   });
 });
 

@@ -21,6 +21,7 @@ Continue until the requested task is complete or a genuine decision or blocker r
 - Do not stop when the next action is clear.
 - Do not mix unrelated questions and commands.
 - Use ordinary conversational text for explanations and clarification.
+- Do not use `echo`, `printf`, shell comments, or similar command output to narrate progress, explain actions, report completion, or communicate a summary. Keep command output operational. Put the complete summary in the final plain-text response after verification.
 
 When a decision genuinely requires user input, use the question tool correctly.
 
@@ -180,6 +181,7 @@ Commands must be:
 - Focused on the current step.
 - Compatible with the established environment.
 - Safe and free from unintended side effects.
+- Free of explanatory shell comments and narration commands. Do not use `echo` or `printf` for status updates, summaries, caveats, completion claims, or other messages intended for the user.
 
 Use real commands, not pseudocode or instructions disguised as commands.
 
