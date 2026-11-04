@@ -636,6 +636,7 @@ Instead of `plugins`, set on the chat message:
 The agent's instructions are **baked in at create time** and can't be cheaply updated in place (the update API needs a `changeToken` only returned by *create*; `updateBotInstructions()` is dead code). So instead of editing in place, the agent is **versioned by name**:
 
 - Name = `m365-tool-agent-<hash>`, where `<hash>` = first 8 hex of `sha256(getAgentInstructions())`.
+- `getAgentInstructions()` returns `packages/prompts/opencode-system.md` — the same text the proxy sends as the harness system prompt, so the agent and the request path teach one contract (one fenced block per turn, `question` for decisions, `patch` for file changes).
 - `getOrCreateAgent()` computes the wanted name, looks for it via `listBots`, and **creates a fresh agent** if absent (instructions are baked into `createBot`). The local cache (`agent-id.json`) stores `instructionsHash`; a mismatch forces a rebuild.
 - Stale `m365-tool-agent-*` bots are **never deleted** — we removed the cleanup pass entirely (multi-host safety, see below). A few orphaned lightweight bots per instruction change are harmless.
 - Hosts sharing a tenant compute the **same name for the same instructions**, so they converge on one agent with no coordination.

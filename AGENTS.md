@@ -164,8 +164,9 @@ pnpm test:live      # M365_LIVE=1; live tests that hit real M365 (uses quota)
 - **Prompt *framing* can't flip the turn-1 reflex; format/routing can.** 8 per-request
   behavioral-prompt variants moved nothing (0 tool calls); heavy anti-advise framing in the
   agent *backfired*. Don't try to wordsmith the model into acting — route its natural ```` ```bash ````.
-- **The agent is versioned by an instructions hash.** Its name is
-  `m365-tool-agent-<sha256(instructions)[:8]>`, so editing `getAgentInstructions()` auto-
+- **The agent is versioned by an instructions hash.** Its instructions are literally
+  `packages/prompts/opencode-system.md` (the same text sent as the harness system prompt), and
+  its name is `m365-tool-agent-<sha256(instructions)[:8]>`, so editing that file auto-
   provisions a fresh agent on the next request. Stale versions are **always left in place**
   (we never delete agents), which avoids the multi-host footgun where a host on new code
   would delete the agent another host/PC is still using mid-conversation. A few orphaned

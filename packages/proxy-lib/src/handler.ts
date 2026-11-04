@@ -238,8 +238,6 @@ const CONFAB_FORCE_PROMPT = readPromptFile("nudges/confab.md");
 const MIDTASK_FORCE_PROMPT = readPromptFile("nudges/midtask.md");
 
 // Forcing follow-up when the model CLAIMS it did a file change but ran no tool.
-const TOOLS_RESEND_PROMPT = readPromptFile("nudges/tools-resend.md");
-
 const HALLUCINATION_FORCE_PROMPT = readPromptFile("nudges/hallucination.md");
 
 // A Teams artifact belongs to M365's remote runtime and cannot be applied by a
@@ -251,12 +249,12 @@ const CONTINUE_PROMPT = readPromptFile("nudges/continue.md");
 
 const NOOP_SHELL_PROMPT = readPromptFile("nudges/noop-shell.md");
 
-const PERIODIC_TOOL_REMINDER = readPromptFile("nudges/periodic-tool-reminder.md");
+const PERIODIC_TOOL_REMINDER = readPromptFile("periodic-tool-reminder.md");
 
-// Continuations send only the new messages (M365 keeps the framing server-side),
-// so the model loses the "act with a block" pressure exactly when it matters.
-// A one-line reminder on every delta turn keeps tool use the default.
-const TURN_REMINDER = process.env.M365_NO_TURN_REMINDER ? "" : readPromptFile("nudges/turn-reminder.md");
+// SENDTOOLS / RESENDTOOLS re-sends the same reminder the periodic path uses, so
+// the recovery path and the cadence path can't drift into two descriptions of
+// the same contract.
+const TOOLS_RESEND_PROMPT = PERIODIC_TOOL_REMINDER;
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -688,14 +686,17 @@ const TITLE_REQUEST_MARKER = /You name conversations so the user can find them l
 type PromptLog = { dir: string; base: string };
 let promptLogSeq = 0;
 
-function openPromptLog(body: ChatBody): PromptLog | null {
-  const dir = process.env.M365_PROMPT_LOG_DIR?.trim();
+function openPromptLog(body: ChatBody, conversationId?: string): PromptLog | null {
+  const dir =
+    process.env.M365_PROMPT_LOG_OUT_DIR?.trim()
+    || process.env.M365_PROMPT_LOG_DIR?.trim();
   if (!dir) return null;
   try {
     mkdirSync(dir, { recursive: true });
     promptLogSeq += 1;
-    const base = `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(promptLogSeq).padStart(3, "0")}`;
-    writeFileSync(join(dir, `${base}-original.json`), JSON.stringify({
+    const base = (conversationId?.replace(/[^a-zA-Z0-9_-]/g, "_")
+      || `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(promptLogSeq).padStart(3, "0")}`);
+    writeFileSync(join(dir, `${base}-OUToriginal-turn00.json`), JSON.stringify({
       model: body.model,
       stream: body.stream,
       tool_choice: body.tool_choice,
@@ -772,11 +773,11 @@ export async function handleChatCompletion(
     log.info(`title request: serving "${localTitle}" locally — no M365 turn`);
     return localTitleResponse(body, localTitle);
   }
-  const promptLog = openPromptLog(body);
-  let promptTurn = 0;
-  let rawTurn = 0;
   const conv = pool.resolve(body.messages, body.tools);
   const { session } = conv;
+  const promptLog = openPromptLog(body, session.conversationId);
+  let promptTurn = 0;
+  let rawTurn = 0;
   const restoreContext = requestsContextRestore(body.messages);
   const restoreTools = !restoreContext && requestsToolsRestore(body.messages);
   if (restoreContext) {
@@ -845,7 +846,11 @@ export async function handleChatCompletion(
     const output = formatCoreMessages(...args);
     if (promptLog) {
       promptTurn += 1;
-      writePromptLog(promptLog, `turn-${String(promptTurn).padStart(2, "0")}-converted.txt`, output);
+      writePromptLog(
+        promptLog,
+        `turn-${String(promptTurn).padStart(2, "0")}-OUTconverted.txt`,
+        output,
+      );
     }
     return output;
   }
@@ -899,9 +904,9 @@ export async function handleChatCompletion(
     inputImages = imageUrls(newMessages);
     const delta = newMessages.length > 0 ? formatDeltaMessages(newMessages, body.messages) : "";
     if (delta.length > 0) {
-      // The upstream conversation retains its initial framing, tool schemas
-      // and workflow preferences. Send only new messages on continuations.
-      text = TURN_REMINDER ? `${TURN_REMINDER}\n\n${delta}` : delta;
+      // The upstream conversation retains its initial prompt, tool schemas and
+      // workflow preferences, so a continuation carries only the new messages.
+      text = delta;
       const callOrdinal = proxyCallOrdinal(body.messages);
       if (periodicToolReminderDue(callOrdinal)) {
         text = `${PERIODIC_TOOL_REMINDER}\n\n${text}`;
@@ -1140,8 +1145,8 @@ export async function handleChatCompletion(
         if (promptLog) {
           rawTurn += 1;
           const suffix = String(rawTurn).padStart(2, "0");
-          writePromptLog(promptLog, `raw-${suffix}.txt`, fullText);
-          writePromptLog(promptLog, `raw-${suffix}.meta.json`, JSON.stringify({
+          writePromptLog(promptLog, `turn-${suffix}-INresponse.txt`, fullText);
+          writePromptLog(promptLog, `turn-${suffix}-INresponse.meta.json`, JSON.stringify({
             model, tone, agent: useToolAgent, framing: framingVariant,
             message_type: copilotStream.messageType ?? null,
             turn_count: copilotStream.turnCount ?? null,
@@ -1615,7 +1620,9 @@ export async function handleChatCompletion(
       let sent = "";
       let pending = "";
       let blocked = false;
-      let startedTool: { id: string; name: string } | undefined;
+      let startedTool: { id: string; name: string; bodyParam?: string } | undefined;
+      let streamedToolBody = 0;
+      let streamedToolArguments = "";
       const markers = ["data:" + "image/", "iVBORw0KGgo", "/9j/", "UklGR", "!["];
       if (hasTools) markers.push("<tool_", "<invoke", "<function");
       const toolFenceNames = hasTools ? [...buildSpecMap(body.tools ?? []).keys()] : [];
@@ -1638,7 +1645,7 @@ export async function handleChatCompletion(
             }] });
           }
         }
-        if (!delta || blocked) return;
+        if (!delta || (blocked && !startedTool)) return;
         pending += delta;
         if (couldBePriorityAccessPrefix(pending)) return;
         // Tool-mode retries may replace a refusal or a fabricated completion.
@@ -1680,6 +1687,12 @@ export async function handleChatCompletion(
                 startedTool = {
                   id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
                   name: spec.name,
+                  bodyParam:
+                    ["bash", "shell", "sh", "zsh", "run", "exec", "command", "cmd", "terminal", "run_command", "run_terminal_cmd", "execute_command", "execute_bash", "shell_exec", "system"].includes(spec.name) &&
+                    spec.bodyParam &&
+                    spec.headerParams.length === 0
+                      ? spec.bodyParam
+                      : undefined,
                 };
                 send({ ...base, choices: [{
                   index: 0,
@@ -1715,6 +1728,45 @@ export async function handleChatCompletion(
           // Marker-prefix holdback above is sufficient; do not delay every
           // ordinary token by a fixed 24-character tail.
         }
+        if (startedTool && blocked) {
+          const fenceMatch = pending.match(/^```[A-Za-z0-9_.-]+\s*\n([\s\S]*)$/);
+          if (fenceMatch && startedTool.bodyParam) {
+            const rawBody = fenceMatch[1];
+            const closingFence = /\r?\n```[ \t]*(?:\r?\n)?$/.exec(rawBody);
+            let stableEnd = closingFence?.index ?? rawBody.length;
+            if (!closingFence) {
+              for (const marker of ["\n```", "\r\n```"]) {
+                for (let size = 1; size <= marker.length; size++) {
+                  if (rawBody.endsWith(marker.slice(0, size))) {
+                    stableEnd = Math.min(stableEnd, rawBody.length - size);
+                  }
+                }
+              }
+            }
+            const stableBody = rawBody.slice(0, stableEnd);
+            const bodyDelta = stableBody.slice(streamedToolBody);
+            if (bodyDelta) {
+              const argumentDelta =
+                (streamedToolArguments.length === 0
+                  ? `{${JSON.stringify(startedTool.bodyParam)}:"`
+                  : "") +
+                JSON.stringify(bodyDelta).slice(1, -1);
+              streamedToolBody = stableBody.length;
+              streamedToolArguments += argumentDelta;
+              try {
+                send({ ...base, choices: [{
+                  index: 0,
+                  delta: { tool_calls: [{
+                    index: 0,
+                    function: { arguments: argumentDelta },
+                  }] },
+                  finish_reason: null,
+                }] });
+              } catch {}
+            }
+          }
+          return;
+        }
         if (end <= sent.length) return;
         const content = pending.slice(sent.length, end);
         sent += content;
@@ -1732,6 +1784,17 @@ export async function handleChatCompletion(
           (p.kind !== "tools" || p.toolCalls[0]?.function.name !== startedTool.name)) {
         p = { kind: "error", resp: jsonResponse(502, { error: {
           message: "The final response changed an announced tool call. No tool arguments were committed; retry the request.",
+          type: "tool_stream_mismatch",
+        } }) };
+      }
+      if (
+        startedTool &&
+        p.kind === "tools" &&
+        streamedToolArguments &&
+        !p.toolCalls[0].function.arguments.startsWith(streamedToolArguments)
+      ) {
+        p = { kind: "error", resp: jsonResponse(502, { error: {
+          message: "The final tool arguments diverged from their streamed prefix. The tool call was not committed.",
           type: "tool_stream_mismatch",
         } }) };
       }
@@ -1759,10 +1822,11 @@ export async function handleChatCompletion(
           p.toolCalls.forEach((tc, i) => {
             log.debug(`Tool call: ${tc.function.name} ${trunc(tc.function.arguments, 200)}`);
             if (i === 0 && startedTool) {
+              const finalArgs = tc.function.arguments.slice(streamedToolArguments.length);
               send({ ...base, choices: [{
                 index: 0,
                 delta: { tool_calls: [{
-                  index: 0, function: { arguments: tc.function.arguments },
+                  index: 0, function: { arguments: finalArgs },
                 }] },
                 finish_reason: null,
               }] });

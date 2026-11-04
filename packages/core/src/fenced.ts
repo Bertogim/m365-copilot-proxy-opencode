@@ -620,10 +620,10 @@ type FramingBuilder = (tools: ToolDef[]) => string;
 const PATCH_TOOL_NAME = /^(apply_patch|patch|apply_diff)$/i;
 const QUESTION_TOOL_NAME = /^(question|ask_user|ask)$/i;
 
-/** Prompt texts live in `prompts/framing/<variant>.md`; placeholders are filled
+/** Prompt texts live in `prompts/old/framing/<variant>.md`; placeholders are filled
  *  with the per-request shell dialect so the files stay readable. */
 function framing(key: string, vars: Record<string, string> = {}): string {
-  return readPromptFile(`framing/${key}.md`).replace(/\{\{(\w+)\}\}/g, (_, name: string) => vars[name] ?? "");
+  return readPromptFile(`old/framing/${key}.md`).replace(/\{\{(\w+)\}\}/g, (_, name: string) => vars[name] ?? "");
 }
 
 const FRAMING_VARIANTS: Record<string, FramingBuilder> = {

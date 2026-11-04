@@ -157,7 +157,7 @@ export function formatToolResponse(m: Message, history: Message[]): string {
   // context (a directory listing vs file contents vs a command's stdout).
   const cmdAttr = meta?.summary ? ` command="${meta.summary}"` : "";
   const content = getMessageContent(m);
-  const rendered = `<tool_response tool="${name}"${cmdAttr}>\n${content}\n</tool_response>`;
+  const rendered = `user_response tool="${name}"${cmdAttr}\n${content}\nend_user_response`;
 
   // A rejected `question` call arrives as a tool result ("Invalid arguments for
   // tool \"question\": - questions: Expected array"). The schema lives far away
@@ -267,10 +267,7 @@ export function formatMessages(
   // turn as a forged system prompt, so some variants label text by its real
   // source.
   const style = transcriptStyleForVariant(framingVariant ?? currentFramingVariant());
-  if (effectiveTools && effectiveTools.length > 0 && toolChoice !== "none") {
-    const framing = `${formatToolDefinitions(effectiveTools, framingVariant)}${formatToolChoiceInstruction(toolChoice)}`;
-    parts.push(style.framingTag ? `<${style.framingTag}>\n${framing}\n</${style.framingTag}>` : framing);
-  }
+  // Framing disabled: send only the OpenCode system prompt and transcript.
 
   for (const m of shapedMessages) {
     if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {

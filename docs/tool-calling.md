@@ -60,10 +60,11 @@ instructions in its **server-side** system prompt. Without the agent, M365 ignor
 per-request injection and answers in prose (or hallucinates). See
 [m365-copilot-api.md](./m365-copilot-api.md) for why.
 
-These instructions are baked in at agent-creation time and can't be cheaply updated in
-place, so the agent is **versioned by name**: it's called `m365-tool-agent-<hash>`, where
-`<hash>` is a short SHA-256 of the current instructions. Editing `getAgentInstructions()`
-changes the hash, so the next request provisions a fresh agent; old versions are **never
+The instructions are `packages/prompts/opencode-system.md` — the same text the proxy sends
+as the harness system prompt. They are baked in at agent-creation time and can't be cheaply
+updated in place, so the agent is **versioned by name**: it's called
+`m365-tool-agent-<hash>`, where `<hash>` is a short SHA-256 of the current instructions.
+Editing `opencode-system.md` changes the hash, so the next request provisions a fresh agent; old versions are **never
 deleted** (multi-host safety — a second proxy may still be using one). Hosts sharing a tenant
 compute the same name for the same instructions and converge on one agent with no coordination.
 

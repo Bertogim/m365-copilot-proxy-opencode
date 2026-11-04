@@ -1,1 +1,3 @@
-The patch or download link you produced exists only in M365's remote environment and is NOT a file in the caller's working directory. Do NOT create, download, or apply a patch, and do NOT use a Teams artifact link. Use the provided local edit/write tool directly; if needed, emit ONE ```bash block that modifies the named local file in place. Output only that single local tool call, nothing else.
+That patch or link only exists in your remote environment. It is not in my working directory, so I can't apply it there.
+
+Give me the change for the local file instead: a `patch` block with its contents, or a command if one is genuinely needed. No Teams links and no `sandbox:/mnt/data/...` paths — I can't reach them.

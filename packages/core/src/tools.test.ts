@@ -149,17 +149,16 @@ describe("M365_INJECT_REPLY_TOOL", () => {
     expect(out).not.toContain("```reply");
   });
 
-  it("injects a reply tool when M365_INJECT_REPLY_TOOL is set", async () => {
+  it("does not render the injected reply tool while framing is disabled", async () => {
     process.env.M365_INJECT_REPLY_TOOL = "1";
     const fmt = await importFormat();
     const out = fmt(userMsg, sampleTools);
-    expect(out).toContain("```reply");
-    // It must also still include the caller's tools (fenced template)
-    expect(out).toContain("```bash");
+    expect(out).not.toContain("```reply");
+    expect(out).not.toContain("```bash");
     delete process.env.M365_INJECT_REPLY_TOOL;
   });
 
-  it("doesn't double-inject a reply tool already provided by the caller", async () => {
+  it("does not render a caller reply tool while framing is disabled", async () => {
     process.env.M365_INJECT_REPLY_TOOL = "1";
     const fmt = await importFormat();
     const callerReply = {
@@ -171,9 +170,8 @@ describe("M365_INJECT_REPLY_TOOL", () => {
       },
     };
     const out = fmt(userMsg, [callerReply, ...sampleTools]);
-    // Exactly one fenced template for the reply tool
     const matches = out.match(/```reply/g) ?? [];
-    expect(matches).toHaveLength(1);
+    expect(matches).toHaveLength(0);
     delete process.env.M365_INJECT_REPLY_TOOL;
   });
 });
@@ -452,7 +450,10 @@ describe("tool-result labelling", () => {
       ],
       tools,
     );
-    expect(out).toContain('<tool_response tool="bash" command="ls -la">');
+    expect(out).toContain('user_response tool="bash" command="ls -la"');
+    expect(out).toContain("README.md\nend_user_response");
+    expect(out).not.toContain('<tool_response tool="bash"');
+    expect(out).not.toContain("</tool_response>");
     expect(out).not.toContain('name="unknown"');
   });
 
@@ -462,7 +463,9 @@ describe("tool-result labelling", () => {
       [{ role: "tool", tool_call_id: "orphan", content: "some output" }],
       tools,
     );
-    expect(out).toContain('<tool_response tool="tool">');
+    expect(out).toContain('user_response tool="tool"');
+    expect(out).toContain("some output\nend_user_response");
+    expect(out).not.toContain('<tool_response tool="tool"');
   });
 });
 
@@ -673,11 +676,13 @@ describe("transcript style (which tags wrap the framing and harness system promp
     { role: "user", content: "fix the bug" },
   ];
 
-  it("keeps <system> tags for baseline — the bench-tuned default is unchanged", async () => {
+  it("keeps only the harness system prompt and transcript when framing is disabled", async () => {
     const { formatMessages } = await import("./tools.js");
     const out = formatMessages(msgs, tools, undefined, undefined, "baseline");
-    expect(out).toMatch(/^<system>\nYou are the execution core/);
+    expect(out).toMatch(/^<system>\nYou are an autonomous coding agent/);
     expect(out).toContain("<system>\nYou are an autonomous coding agent.\n</system>");
+    expect(out).not.toContain("You are the execution core");
+    expect(out).not.toContain("<tools>");
     expect(out).not.toContain("harness_");
   });
 
@@ -687,15 +692,17 @@ describe("transcript style (which tags wrap the framing and harness system promp
       const out = formatMessages(msgs, tools, undefined, undefined, v);
       expect(out).not.toContain("<system>");
       expect(out).toContain("<harness_system_prompt>\nYou are an autonomous coding agent.\n</harness_system_prompt>");
-      expect(out).toContain("```bash"); // shell-routing survives
+      expect(out).not.toContain("```bash");
       expect(out).toContain("<user>\nfix the bug\n</user>");
     }
   });
 
-  it("retag changes only the wrapper, not the baseline text inside it", async () => {
-    const { formatMessages, formatToolDefinitions } = await import("./tools.js");
+  it("retag keeps the harness prompt wrapper without adding framing", async () => {
+    const { formatMessages } = await import("./tools.js");
     const out = formatMessages(msgs, tools, undefined, undefined, "retag");
-    expect(out).toContain(`<harness_instructions>\n${formatToolDefinitions(tools, "baseline")}\n</harness_instructions>`);
+    expect(out).toContain("<harness_system_prompt>\nYou are an autonomous coding agent.\n</harness_system_prompt>");
+    expect(out).not.toContain("<harness_instructions>");
+    expect(out).not.toContain("<tools>");
     expect(out).not.toContain("<system>");
   });
 
@@ -774,7 +781,7 @@ When you create a worktree outside the current working directory, consider using
     );
     expect(out).not.toContain("```execute");
     expect(out).not.toContain("Run JavaScript");
-    expect(out).toContain("```bash");
+    expect(out).not.toContain("```bash");
   });
 
   it("keeps the harness's own prompt — only the tool layer is adapted", async () => {
@@ -827,9 +834,10 @@ When you create a worktree outside the current working directory, consider using
     );
     // One vocabulary: the harness's `shell`/`edit`/`write` are shown as the fences
     // the framing talks about, in the prompt AND in the <tools> block.
-    expect(oc).toContain("```bash");
-    expect(oc).toContain("```edit");
-    expect(oc).toContain("```write");
+    expect(oc).not.toContain("<tools>");
+    expect(oc).not.toContain("```bash");
+    expect(oc).not.toContain("```edit");
+    expect(oc).not.toContain("```write");
     expect(oc).not.toContain("```shell");
     expect(oc).not.toContain("```execute"); // Code Mode tool, dropped
     expect(oc).not.toContain("Run JavaScript");

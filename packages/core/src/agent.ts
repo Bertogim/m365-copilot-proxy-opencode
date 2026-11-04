@@ -40,20 +40,16 @@ const BOT_ICON_BASE64 =
 /**
  * The server-side agent prompt (baked into the Copilot Studio agent at creation;
  * editing this string changes the instructions hash → a fresh agent auto-provisions).
- * FORMAT-CONTRACT ONLY — it teaches the Markdown-fence tool protocol and stresses
- * that a fence is an executed ACTION, not an illustration. Behavioural framing
- * (shell-first, anti-confabulation) lives in the per-request <tools> block
- * (`formatFencedToolDefinitions`), which is cheap to vary without re-provisioning.
- * See docs/hypotheses.md §9.
+ *
+ * It is the same text the proxy installs as the harness system prompt
+ * (`opencode-system.md`), so the agent and the request path teach ONE contract
+ * instead of two: the execution model, exactly one fenced block per turn,
+ * `question` for decisions and `patch` for file changes. Editing that file now
+ * re-provisions the agent (the name is `<base>-<sha256[:8]>`), which is the
+ * intended way to change agent behaviour.
  */
 function getAgentInstructions(): string {
-  // FORMAT-CONTRACT ONLY. Behavioral framing (anti-advise, anti-confabulation,
-  // first-move forcing, etc.) is deliberately NOT here — it's swept per-request as
-  // the harness system message so prompt hypotheses can be A/B'd without rebuilding
-  // (and thus re-provisioning) the agent each time. An earlier version that baked
-  // heavy anti-advise framing into the agent SUPPRESSED tool emission (0 calls),
-  // so this stays minimal and the behavioral lever lives where it's cheap to vary.
-  return readPromptFile("agent-instructions.md");
+  return readPromptFile("opencode-system.md");
 }
 
 /**

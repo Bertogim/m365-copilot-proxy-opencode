@@ -395,7 +395,7 @@ describe("the only-the-first-call-ran note", () => {
     // Like pi: the result names its call only by tool_call_id.
     const sent = await converse(["```bash\nls\n```", "Done."]);
     // The same rendering as the first turn (tool and command), so the model reads one format.
-    expect(sent[1]).toMatch(/<tool_response tool="bash" command="ls">\nreal output 0\n<\/tool_response>/);
+    expect(sent[1]).toMatch(/user_response tool="bash" command="ls"\nreal output 0\nend_user_response/);
     expect(sent[1]).not.toContain('name="unknown"');
   });
 });
@@ -626,16 +626,17 @@ describe("Disengage retry keeps a model's <system>-free framing", () => {
   it("retries Sonnet 5 with relay again, never a <system>-tagged framing", async () => {
     const retry = await disengageThenAnswer("claude-sonnet-5");
     expect(retry).not.toContain("<system>");
-    expect(retry).toContain("guide me through this from my terminal, one command at a time");
-    expect(retry).not.toContain("put as much as you can into one block");
+    expect(retry).toContain("<harness_system_prompt>");
+    expect(retry).toContain("# Execution model");
   });
 
   it("sends Opus, Sonnet 4.6 and GPT-6 relay_batch on the first try and keeps it on the retry (§24, §25)", async () => {
     for (const model of ["claude-opus-4.8", "claude-opus", "claude-sonnet", "gpt-6-think-deeper"]) {
       const retry = await disengageThenAnswer(model);
-      expect(scripted.texts[0]).toContain("put as much as you can into one block");
+      expect(scripted.texts[0]).not.toContain("put as much as you can into one block");
       expect(scripted.texts[0]).not.toContain("<system>");
-      expect(retry).toContain("put as much as you can into one block");
+      expect(scripted.texts[0]).toContain("# Execution model");
+      expect(retry).toContain("# Execution model");
     }
   });
 
@@ -643,7 +644,8 @@ describe("Disengage retry keeps a model's <system>-free framing", () => {
   it("still retries the <system>-tagged defaults with softened (F22)", async () => {
     const retry = await disengageThenAnswer("gpt-5.5-think-deeper");
     expect(retry).toContain("<system>");
-    expect(retry).toContain("You are an automated coding agent working in a real working directory");
+    expect(retry).toContain("# Execution model");
+    expect(retry).not.toContain("You are an automated coding agent working in a real working directory");
   });
 });
 
@@ -748,7 +750,7 @@ describe("GPT-6 Sol: agent on premium, learned fallback on non-premium (#23)", (
     expect(scripted.newConversations).toBe(1);
     // The retry is the whole request, not a "Please continue." into nothing.
     expect(scripted.texts[1]).toContain("list files");
-    expect(scripted.texts[1]).toContain("```bash");
+    expect(scripted.texts[1]).toContain("# Execution model");
   });
 
   it("remembers it: the next request goes agent-less from the start", async () => {
@@ -818,7 +820,7 @@ describe("follow-up turns and give-ups (Windows / pi, measured)", () => {
     messages.push({ role: "assistant", content: null, tool_calls: m1.tool_calls });
     messages.push({ role: "tool", tool_call_id: m1.tool_calls[0].id, content: "README.md" });
     await ask(messages, pool);
-    expect(scripted.texts[1]).toContain('<tool_response tool="bash" command="ls -la">');
+    expect(scripted.texts[1]).toContain('user_response tool="bash" command="ls -la"');
     expect(scripted.texts[1]).not.toContain('name="unknown"');
     scripted.queue = [];
   });
@@ -858,8 +860,7 @@ describe("follow-up turns and give-ups (Windows / pi, measured)", () => {
     const m2 = await ask(messages, pool);
     expect(scripted.texts).toHaveLength(3);
     expect(scripted.texts[2]).toContain("Your tools are working");
-    // The forcing retry must re-expose the tool-block vocabulary.
-    expect(scripted.texts[2]).toContain("```bash");
+    expect(scripted.texts[2]).toContain("install it with the project's package manager");
     expect(scripted.texts[2]).not.toContain("you have not run any command yet");
     expect(JSON.parse(m2.tool_calls[0].function.arguments).command).toBe("py -m pip install fpdf2");
     scripted.queue = [];
@@ -955,7 +956,7 @@ describe("failed patch reminders and no-op shell completion attempts", () => {
       }), new SessionPool());
       const message = (await response.json()).choices[0].message;
       expect(scripted.texts).toHaveLength(2);
-      expect(scripted.texts[1]).toContain("return the final summary as plain text");
+      expect(scripted.texts[1]).toContain("give me the summary as plain text");
       expect(message.tool_calls).toBeUndefined();
       expect(message.content).toContain("Implemented the requested change");
     });
@@ -1039,7 +1040,7 @@ describe("a new harness session that shares the first user message", () => {
     msgs.push({ role: "tool", tool_call_id: m1.tool_calls[0].id, content: "a.txt" });
     await ask(msgs, pool);
     expect(scripted.newConversations).toBe(0);
-    expect(scripted.texts[1]).toContain('<tool_response tool="bash"'); // a delta
+    expect(scripted.texts[1]).toContain('user_response tool="bash"'); // a delta
     scripted.queue = [];
   });
 });
@@ -1075,7 +1076,7 @@ describe("a side request that shares the session's first user message (#83)", ()
       { role: "tool", tool_call_id: call.id, content: "calc.py" },
     ], tools);
     expect(servedBy[2]).toBe(servedBy[1]);
-    expect(scripted.texts[2]).toContain('<tool_response tool="bash"');
+    expect(scripted.texts[2]).toContain('user_response tool="bash"');
     expect(scripted.newConversations).toBe(0);
     scripted.queue = [];
   });
@@ -1646,7 +1647,7 @@ describe("incremental streaming with workspace tools", () => {
     const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("");
     expect(content).toBe("");
     const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
-    expect(calls).toHaveLength(2);
+    expect(calls.length).toBeGreaterThanOrEqual(3);
     expect(calls[0].function.name).toBe("bash");
     expect(calls[0].function.arguments).toBe("");
     expect(calls[0].id).toMatch(/^call_/);
@@ -1660,9 +1661,29 @@ describe("incremental streaming with workspace tools", () => {
   it("waits for the complete shell header before starting native tool input", async () => {
     const chunks = await collect(["```bash", "\n", "pwd", "\n```"]);
     const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
-    expect(calls).toHaveLength(2);
+    expect(calls.length).toBeGreaterThanOrEqual(3);
     expect(calls[0].function).toEqual({ name: "bash", arguments: "" });
-    expect(JSON.parse(calls[1].function.arguments)).toEqual({ command: "pwd" });
+    expect(JSON.parse(calls.map(call => call.function.arguments).join(""))).toEqual({ command: "pwd" });
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
+  it("streams shell command arguments incrementally as valid JSON fragments", async () => {
+    const chunks = await collect([
+      "```bash\n",
+      "pnpm ",
+      "test ",
+      "--filter proxy-lib",
+      "\n```",
+    ]);
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    const argumentChunks = calls
+      .map(call => call.function.arguments)
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+
+    expect(argumentChunks.length).toBeGreaterThan(2);
+    expect(JSON.parse(argumentChunks.join(""))).toEqual({
+      command: "pnpm test --filter proxy-lib",
+    });
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 
@@ -1687,13 +1708,13 @@ describe("incremental streaming with workspace tools", () => {
       }];
       const chunks = await collect(["``", "`" + fence, "\n", "pwd", "\n```"], false, requestTools);
       const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
-      expect(calls).toHaveLength(2);
+      expect(calls.length).toBeGreaterThanOrEqual(3);
       expect(calls[0].function).toEqual({ name: "shell", arguments: "" });
       expect(calls[0].id).toMatch(/^call_/);
       expect(calls[1].index).toBe(0);
       expect(calls[1].id).toBeUndefined();
       expect(calls[1].function.name).toBeUndefined();
-      expect(JSON.parse(calls[1].function.arguments)).toEqual({ command: "pwd" });
+      expect(JSON.parse(calls.map(call => call.function.arguments).join(""))).toEqual({ command: "pwd" });
       expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
       expect(chunks.some(chunk => chunk.choices?.[0]?.delta?.reasoning_content)).toBe(false);
       expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
@@ -1827,11 +1848,12 @@ describe("workspace framing on continued tool turns", () => {
       await post();
       expect(scripted.newConversations).toBe(0);
       expect(scripted.texts[0]).not.toContain("WORKSPACE_REFRESH");
-      expect(scripted.texts[0]).toContain("Before the task, a note on how we\'ll work:");
+      expect(scripted.texts[0]).toContain("# Execution model");
+      expect(scripted.texts[0]).not.toContain("Before the task, a note on how we'll work:");
       expect(scripted.texts[1]).not.toContain("WORKSPACE_REFRESH");
       expect(scripted.texts[1]).not.toContain("Tool use is the default and text is the exception.");
       expect(scripted.texts[1]).not.toContain("Before the task, a note on how we'll work:");
-      expect(scripted.texts[1]).toContain('<tool_response tool="bash"');
+      expect(scripted.texts[1]).toContain('user_response tool="bash"');
     } finally {
       scripted.queue = [];
       resetAgentRoutes();
@@ -1986,7 +2008,7 @@ describe("RESENDTOOLS", () => {
     return scripted.texts.at(-1)!;
   }
 
-  it("re-sends the tool framing into the same conversation, keeping history", async () => {
+  it("re-sends the tool instructions into the same conversation, keeping history", async () => {
     const pool = new SessionPool();
     const messages: any[] = [{ role: "user", content: "ORIGINAL_TASK_MARKER" }];
     await post(pool, messages);
@@ -1998,8 +2020,8 @@ describe("RESENDTOOLS", () => {
     const prompt = await post(pool, messages);
     expect(prompt).not.toContain("ORIGINAL_TASK_MARKER"); // no history replay
     expect(prompt).not.toContain("RESENDTOOLS");
-    expect(prompt).toContain("```bash"); // tool-block instructions re-sent
-    expect(prompt).toContain("```bash or ```patch");
+    // The recovery path re-sends the periodic reminder, not a separate file.
+    expect(prompt).toContain("I will execute it myself in the terminal");
     expect(scripted.newConversations).toBe(rotations); // same conversation
   });
 
@@ -2012,7 +2034,7 @@ describe("RESENDTOOLS", () => {
       messages.push({ role: "user", content: command });
       const prompt = await post(pool, messages);
       expect(prompt).not.toContain("TASK_MARKER");
-      expect(prompt).toContain("```bash");
+      expect(prompt).toContain("I will execute it myself in the terminal");
       expect(scripted.newConversations).toBe(rotations);
     }
   });
@@ -2073,12 +2095,10 @@ describe("synthetic proxy waiting indicator", () => {
               expect(prompt).not.toContain("Before the task, a note on how we'll work:");
             }
           } else {
-            expect(prompt).toContain("Before the task, a note on how we\'ll work:");
-            expect(prompt).toContain("You are the execution core of an automated coding agent");
-            expect(prompt).toContain("Never claim a command returned no output");
-            expect(prompt).toContain("Do not create `.bak`");
-            expect(prompt).toContain("Keep shell output operational");
-            expect(prompt).toContain("The final answer is the only turn without a block");
+            expect(prompt).not.toContain("Before the task, a note on how we'll work:");
+            expect(prompt).toContain("Provide actionable commands or patches instead of announcing intended actions.");
+            expect(prompt).toContain("The tool has a strict argument schema.");
+            expect(prompt).toContain("Use fenced `bash` blocks whenever the user needs to execute terminal commands.");
           }
         }
       }
@@ -2169,9 +2189,9 @@ describe("synthetic proxy waiting indicator", () => {
     expect(chunks.slice(boundary).some(c =>
       c.choices?.[0]?.delta?.reasoning_content !== undefined)).toBe(false);
     const calls = chunks.flatMap(c => c.choices?.[0]?.delta?.tool_calls ?? []);
-    expect(calls).toHaveLength(2);
+    expect(calls.length).toBeGreaterThanOrEqual(3);
     expect(calls[0].function).toEqual({ name: "shell", arguments: "" });
-    expect(JSON.parse(calls[1].function.arguments)).toEqual({ command: "pwd" });
+    expect(JSON.parse(calls.map(call => call.function.arguments).join(""))).toEqual({ command: "pwd" });
     expect(chunks.map(c => c.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });

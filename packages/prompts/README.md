@@ -5,11 +5,12 @@ Markdown, so it can be edited without touching TypeScript. `readPromptFile()`
 (`packages/core/src/prompt-file.ts`) resolves `packages/prompts/<name>` from both
 `src/` and `dist/`.
 
-**Hot-reload:** `opencode-system.md` and `framing/*.md` are read on every request, so edits
-apply to the next turn. `agent-instructions.md` is hashed per request: a change
-gives the agent a new name, so the next request provisions a fresh Copilot
-Studio bot with the new text (old versions are left in place). `nudges/*.md` are loaded once at proxy start — restart the proxy after editing
-them.
+**Hot-reload:** `opencode-system.md` is read on every request, so edits apply to the
+next turn. It is also the Copilot Studio **agent instructions** text, hashed per
+request: a change gives the agent a new name, so the next request provisions a fresh
+bot with the new text (old versions are left in place). `old/framing/*.md` is still
+resolved from `old/` by the framing builder, which no request path calls. Reminders and
+`nudges/*.md` are loaded once at proxy start, so restart the proxy after editing them.
 
 **OpenCode upgrades.** `system-filter.opencode.test.ts` runs the real `opencode` binary
 against a fake proxy. It warns when the binary version differs from the one the prompt was
@@ -23,24 +24,32 @@ that fires: re-capture the prompt (fake proxy + `opencode run --standalone`), up
 
 | File | Role | When it is used |
 |---|---|---|
-| `opencode-system.md` | The **only** system message sent to M365. Leaner fork: execution contract, one fence per turn, first-move anti-confab rule, and the ` ```question ` block as the way to ask for a decision. | Every full turn (first message, context restore, nudges). The harness's own `system`/`developer` messages are dropped (`stripHarnessPrompt`) and this file is sent verbatim (`applySystemPrompt`). Disable with `M365_SYSTEM_PROMPT=0`; a path uses that file instead. |
-| `opencode-system-old.md` | Previous system prompt (the fuller OpenCode-derived text plus the pasted confab imperative). Kept for reference/rollback. | Opt-in: `M365_SYSTEM_PROMPT=<repo>/packages/prompts/opencode-system-old.md`. |
-| `framing/<variant>.md` | Behavioural wrapper injected into the user turn, around the fenced tool instructions. | Every tool request, **one** variant only. Chosen by `M365_FRAMING_FILE` (first line of a control file) > `M365_FRAMING_VARIANT` > per-model default. See the table below. |
-| `agent-instructions.md` | Format contract of the Copilot Studio tool agent. | Server-side: baked into the bot when it is provisioned (`m365-tool-agent-<sha256[:8]>`), on tool requests whose tone uses the agent. Not part of the message text. |
+| `opencode-system.md` | The **only** system message sent to M365, and the **only** prompt installed server-side. Execution contract: the user runs the blocks, one fence per turn, `question` for decisions, `patch` for file changes, summary in plain text when done. | Two places: (1) every full turn (first message, context restore, nudges) — the harness's own `system`/`developer` messages are dropped (`stripHarnessPrompt`) and this file is sent verbatim (`applySystemPrompt`); `M365_SYSTEM_PROMPT=0` disables it, a path replaces it. (2) baked into the Copilot Studio tool agent when it is provisioned (`m365-tool-agent-<sha256[:8]>`), on tool requests whose tone uses the agent. |
+| `old/opencode-system-old.md` | Previous, currently unused system prompt. Kept for reference/rollback. | Opt-in: `M365_SYSTEM_PROMPT=<repo>/packages/prompts/old/opencode-system-old.md`. |
+| `old/framing/<variant>.md` | Behavioural wrapper injected into the user turn, around the fenced tool instructions. | Every tool request, **one** variant only. Chosen by `M365_FRAMING_FILE` (first line of a control file) > `M365_FRAMING_VARIANT` > per-model default. See the table below. |
 | `question-note.md` | The `question` tool schema, with free-form and multiple-choice examples. | Appended right after a `question` tool result that reports `Invalid arguments for tool`, so the retry sees the array contract next to the failure (`formatToolResponse`). |
 | `patch-note.md` | The required `patch` block format and retry guidance. | On every failed patch, the proxy checks the previous failed patch. It appends the reminder only if at least 10 proxy calls have elapsed since that failure. The initial request counts as call 1. |
-| `nudges/confab.md` | "The files are there; you have run nothing — emit one ```bash block." | Retry after a turn-1 confabulation (model asks to paste files / claims no output) with no tool call. |
+| `nudges/confab.md` | "The files are there and I can run what you send; you have run nothing yet" — asks for the first commands. | Retry after a turn-1 confabulation (model asks to paste files / claims no output) with no tool call. |
 | `nudges/midtask.md` | Same, but mid-task (a tool already ran): "tools work, continue with the next step." | Retry when the model confabulates **after** it has already acted. |
-| `nudges/hallucination.md` | "You did not actually do that; nothing changed on disk." | Retry when the model claims a completion it never performed (no tool call ever made). |
-| `nudges/remote-artifact.md` | "That patch/link only exists in M365's remote sandbox; edit the local file." | Retry when the model returns a `sandbox:/mnt/data/...` artifact or Teams link instead of a local edit. |
-| `nudges/tools-resend.md` | Re-sends the framing + tool block with a "continue" nudge. | The `RESENDTOOLS` / `RESTORETOOLS` / `SENDTOOLS` recovery command. |
-| `nudges/turn-reminder.md` | One-line "act, don't chat" reminder: one block, `question` for decisions, `patch` for file changes. | Prepended to **every delta turn** (continuations, where only the new messages are sent and the framing is only server-side). `M365_NO_TURN_REMINDER=1` disables it. |
-| `nudges/periodic-tool-reminder.md` | Reminds the model that the user personally executes one `bash`, `question`, or `patch` block, while completed tasks end in plain text. | Prepended every 15th proxy call. The initial request counts as call 1. |
-| `nudges/continue.md` | Literally "Please continue." | A turn with no new content (retry mode); with tools it is wrapped by `toolNudge` so the framing goes with it. |
+| `nudges/hallucination.md` | "You have not done that yet: nothing ran, so nothing on disk changed." | Retry when the model claims a completion it never performed (no tool call ever made). |
+| `nudges/remote-artifact.md` | "That patch/link only exists in your remote environment; I can't apply it there." | Retry when the model returns a `sandbox:/mnt/data/...` artifact or Teams link instead of a local edit. |
+| `periodic-tool-reminder.md` | Reminds the model that the user personally executes one `bash`, `question`, or `patch` block, while completed tasks end in plain text. | Prepended every 15th proxy call. The initial request counts as call 1. |
+| `nudges/continue.md` | "Continue with the task": one block for the next step, or the final summary if it is done. | A turn with no new content (retry mode); with tools it is wrapped by `toolNudge` so the tool instructions travel with it. |
 | `nudges/noop-shell.md` | Tells the model not to finish through an `echo`, `true`, or `false` shell call. | One same-conversation retry when the response contains only such a shell command. Completed work must be summarized as plain text; unfinished work must continue with a substantive tool call. |
 
 All nudges are one-shot retries (`M365_NO_CONFAB_RETRY` disables them,
 `M365_CONFAB_RETRIES` sets the count). A normal first message uses none of them.
+
+They are written in the **user's first-person voice** — they arrive as a user message, so
+they say what I (the person at the terminal) can run or apply, not what "the user" is. The
+`SENDTOOLS` / `RESENDTOOLS` / `RESTORETOOLS` recovery path reuses
+`periodic-tool-reminder.md` instead of keeping a second copy of the contract.
+
+`old/` holds what the active flow no longer sends: the 16 framing variants (retired
+from `formatMessages`; only the framing builder and the tests read them) and
+`opencode-system-old.md`, kept for rollback. Everything else lives at the top level or
+under `nudges/`, and every nudge is written in the voice of `opencode-system.md` — the
+user runs the blocks, one fence per turn, plain-text summary when done.
 
 ## Framing variants
 
@@ -73,8 +82,8 @@ With `m365/gpt-6.1-sol` and a plain "hola":
 
 ```
 system:  opencode-system.md  (includes the output-discipline rules)
-user:    framing/relay_batch.md + "hola"
-agent:   agent-instructions.md   (server-side, not in the text)
+user:    old/framing/relay_batch.md + "hola"
+agent:   opencode-system.md   (server-side, same text, not in the message)
 ```
 
 The separate title request OpenCode sends is answered locally and uses no file.
@@ -88,4 +97,3 @@ The separate title request OpenCode sends is answered locally and uses no file.
 | `M365_FRAMING_FILE` | File whose first line names the framing; read per request, for A/B sweeps without a restart. |
 | `M365_NO_CONFAB_RETRY`, `M365_CONFAB_RETRIES` | Disable / count the nudge retries. |
 | `M365_DISABLE_TOOL_ACCESS_CONFAB` | Set to `1` to disable only the default detection and automatic tool-instruction resend for false "I can't access the files/tools" responses. Other nudge retries remain enabled. |
-| `M365_NO_TURN_REMINDER` | Drop the per-turn reminder on delta turns. |
