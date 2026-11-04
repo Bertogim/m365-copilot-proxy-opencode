@@ -557,13 +557,15 @@ describe("formatToolDefinitions", () => {
     expect(output).toContain("ACTION"); // a fence is an executed action, not an illustration
   });
 
-  it("lists each tool as a fenced template inside <tools>", () => {
+  it("emits the fenced contract without a per-request tool listing", () => {
     const output = formatToolDefinitions(tools);
 
-    expect(output).toContain("read_file"); // the tool name heads its template
-    expect(output).toContain("```read_file");
-    expect(output).toContain("<tools>");
-    expect(output).toContain("</tools>");
+    expect(output).toContain("TOOL USE IS REQUIRED");
+    expect(output).toContain("PRIMARY JOB");
+    expect(output).toContain("SECONDARY");
+    // The toolset is described by opencode-system.md, not by a <tools> block.
+    expect(output).not.toContain("<tools>");
+    expect(output).not.toContain("```read_file");
   });
 });
 

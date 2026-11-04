@@ -33,7 +33,7 @@ that fires: re-capture the prompt (fake proxy + `opencode run --standalone`), up
 | `nudges/midtask.md` | Same, but mid-task (a tool already ran): "tools work, continue with the next step." | Retry when the model confabulates **after** it has already acted. |
 | `nudges/hallucination.md` | "You have not done that yet: nothing ran, so nothing on disk changed." | Retry when the model claims a completion it never performed (no tool call ever made). |
 | `nudges/remote-artifact.md` | "That patch/link only exists in your remote environment; I can't apply it there." | Retry when the model returns a `sandbox:/mnt/data/...` artifact or Teams link instead of a local edit. |
-| `periodic-tool-reminder.md` | Reminds the model that the user personally executes one `bash`, `question`, or `patch` block, while completed tasks end in plain text. | Prepended every 15th proxy call. The initial request counts as call 1. |
+| `periodic-tool-reminder.md` | Reminds the model that the user personally executes one `bash`, `question`, or `patch` block, while completed tasks end in plain text. | Prepended every 10th proxy call. The initial request counts as call 1. |
 | `nudges/continue.md` | "Continue with the task": one block for the next step, or the final summary if it is done. | A turn with no new content (retry mode); with tools it is wrapped by `toolNudge` so the tool instructions travel with it. |
 | `nudges/noop-shell.md` | Tells the model not to finish through an `echo`, `true`, or `false` shell call. | One same-conversation retry when the response contains only such a shell command. Completed work must be summarized as plain text; unfinished work must continue with a substantive tool call. |
 

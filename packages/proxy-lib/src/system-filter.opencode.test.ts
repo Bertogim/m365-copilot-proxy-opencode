@@ -334,13 +334,15 @@ describe.skipIf(!OPENCODE)("real opencode -> fake proxy (filter out)", () => {
         const title = captured.get("title");
         expect(title).toBeTruthy();
         const wire = JSON.stringify(title!.raw.messages);
-        expect(wire).toContain("You are a title generator");
-        expect(wire).toContain("Generate a brief title");
+        expect(wire).toContain("You name conversations so the user can find them later");
+        expect(wire).toContain("Reply with only the title");
         expect(wire).toContain("one two three four five six seven eight nine ten");
 
         const user = title!.raw.messages.find((m) => m.role === "user");
-        const text = String(user?.content ?? "").replace(/^["']|["']$/g, "");
-        const words = text.split(/\s+/).filter(Boolean);
+        const text = String(user?.content ?? "");
+        expect(text).toContain("Here is the first message of the conversation");
+        const quoted = text.match(/<message>\s*"([^"]+)"/)?.[1] ?? "";
+        const words = quoted.split(/\s+/).filter(Boolean);
         expect(words.slice(0, 5).join(" ") + (words.length > 5 ? "..." : "")).toBe(
           "one two three four five...",
         );

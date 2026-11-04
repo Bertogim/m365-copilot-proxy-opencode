@@ -977,12 +977,13 @@ describe("failed patch reminders and no-op shell completion attempts", () => {
 });
 
 describe("periodic tool reminder", () => {
-  it("runs every 15 calls with the initial request counted as call 1", () => {
+  it("runs every 10 calls with the initial request counted as call 1", () => {
     expect(periodicToolReminderDue(1)).toBe(false);
-    expect(periodicToolReminderDue(14)).toBe(false);
-    expect(periodicToolReminderDue(15)).toBe(true);
-    expect(periodicToolReminderDue(16)).toBe(false);
-    expect(periodicToolReminderDue(29)).toBe(false);
+    expect(periodicToolReminderDue(9)).toBe(false);
+    expect(periodicToolReminderDue(10)).toBe(true);
+    expect(periodicToolReminderDue(11)).toBe(false);
+    expect(periodicToolReminderDue(19)).toBe(false);
+    expect(periodicToolReminderDue(20)).toBe(true);
     expect(periodicToolReminderDue(30)).toBe(true);
   });
 });

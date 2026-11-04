@@ -647,7 +647,7 @@ export function patchReminderDue(lastFailureCall: number | null, currentCall: nu
 }
 
 export function periodicToolReminderDue(currentCall: number): boolean {
-  return currentCall > 0 && currentCall % 15 === 0;
+  return currentCall > 0 && currentCall % 10 === 0;
 }
 
 function isOnlyNoopShellCall(call: ReturnType<typeof parseToolCalls>["toolCalls"][number]): boolean {

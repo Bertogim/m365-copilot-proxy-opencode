@@ -17,6 +17,7 @@ import {
   defaultFramingForModel,
   transcriptStyleForVariant,
 } from "./fenced.js";
+import { readPromptFile } from "./prompt-file.js";
 import type { ToolDef } from "./tools.js";
 
 const bash: ToolDef = {
@@ -142,7 +143,6 @@ describe("canonical fence names (one vocabulary for M365)", () => {
   it("describes a renamed tool the proxy's way, not the harness's", () => {
     const out = formatFencedToolDefinitions([shellTool, applyPatch], "baseline");
     expect(out).toContain("```bash");
-    expect(out).toContain("```patch");
     expect(out).not.toContain("Execute a shell command");
     expect(out).not.toContain("Apply a unified diff.");
   });
@@ -658,55 +658,40 @@ describe("longHeredocAsWrite", () => {
 });
 
 describe("formatFencedToolDefinitions", () => {
-  it("lists each tool as a fenced template inside <tools>", () => {
+  it("returns the shipped framing without a per-request <tools> listing", () => {
     const out = formatFencedToolDefinitions(ALL);
-    expect(out).toContain("<tools>");
-    expect(out).toContain("```bash");
-    expect(out).toContain("```write");
-    expect(out).toContain("<<<<<<< SEARCH");
+    // The toolset is no longer enumerated per request: opencode-system.md is the
+    // one contract (packages/prompts/README.md).
+    expect(out).not.toContain("<tools>");
+    expect(out).not.toContain("```write");
     // Stresses the action-not-illustration contract
     expect(out).toContain("ACTION");
     expect(out).toContain("PRIMARY JOB");
+    expect(out).toContain("```bash"); // the shell route is still named
   });
 });
 
 describe("harness notes (integrated, no OpenCode plugin)", () => {
-  const applyPatch: ToolDef = {
-    type: "function",
-    function: {
-      name: "apply_patch",
-      description: "Apply a patch.",
-      parameters: { type: "object", properties: { patchText: { type: "string" } }, required: ["patchText"] },
-    },
-  };
-  const question: ToolDef = {
-    type: "function",
-    function: {
-      name: "question",
-      description: "Ask the user.",
-      parameters: { type: "object", properties: { questions: { type: "array" } }, required: ["questions"] },
-    },
-  };
-
   it("says a shell is always there — no 'if available' hedge", () => {
     const out = formatFencedToolDefinitions([bash, readFile], "baseline");
-    expect(out).toContain("There is always a real shell here (`bash`)");
+    expect(out).toContain("You have a real shell");
     expect(out).not.toContain("if a shell is available");
   });
 
-  it("teaches the patch markers under the one canonical `patch` fence", () => {
-    const out = formatFencedToolDefinitions([bash, applyPatch], "relay_batch");
-    expect(out).toContain("`patch`");
-    expect(out).toContain("`patchText`");
+  // The patch and question shapes used to be re-taught in the per-request
+  // <tools> block. They now live in the system prompt, which is the one
+  // contract the agent and the request path share.
+  it("teaches the patch markers under the `patch` fence", () => {
+    const out = readPromptFile("opencode-system.md");
+    expect(out).toContain("`patch` block");
     expect(out).toContain("*** Begin Patch");
     expect(out).toContain("*** End Patch");
     expect(out).toContain("*** Update File:");
   });
 
-  it("teaches the question array shape when the harness offers question", () => {
-    const out = formatFencedToolDefinitions([bash, question], "relay_batch");
-    expect(out).toContain("`question`");
-    expect(out).toContain("`questions` as an ARRAY");
+  it("teaches the question array shape", () => {
+    const out = readPromptFile("opencode-system.md");
+    expect(out).toContain("`questions` parameter must always be an array");
   });
 
   it("never names a tool the request doesn't carry", () => {
