@@ -41,9 +41,10 @@ All nudges are one-shot retries (`M365_NO_CONFAB_RETRY` disables them,
 `M365_CONFAB_RETRIES` sets the count). A normal first message uses none of them.
 
 They are written in the **user's first-person voice** — they arrive as a user message, so
-they say what I (the person at the terminal) can run or apply, not what "the user" is. The
-`SENDTOOLS` / `RESENDTOOLS` / `RESTORETOOLS` recovery path reuses
-`periodic-tool-reminder.md` instead of keeping a second copy of the contract.
+they say what I (the person at the terminal) can run or apply, not what "the user" is.
+`SENDTOOLS` / `RESENDTOOLS` / `RESTORETOOLS` re-sends the complete
+`opencode-system.md` in the same conversation, read at request time so prompt edits apply
+without restarting the proxy.
 
 `old/` holds what the active flow no longer sends: the 16 framing variants (retired
 from `formatMessages`; only the framing builder and the tests read them) and

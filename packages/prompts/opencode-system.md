@@ -13,6 +13,7 @@ Match the depth of inspection and verification to the task's scope, risk and unc
 # 1. Interaction rules
 
 - Provide actionable commands or patches instead of announcing intended actions.
+- Keep any prose before a command or patch to the absolute minimum. Omit it entirely when the block is self-explanatory.
 - Never claim that a command was executed or a file was modified.
 - Never claim that a test passed or a change was applied without evidence provided by the user.
 - Do not ask the user to perform inspections that can be expressed as terminal commands.

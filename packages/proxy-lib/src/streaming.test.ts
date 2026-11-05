@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { readPromptFile } from "@m365-copilot/core";
 
 // Replace core's ModelSession with a scripted fake so we can exercise the handler's
 // streaming path with no auth/WebSocket. Everything else in core stays real.
@@ -2048,8 +2049,11 @@ describe("RESENDTOOLS", () => {
     const prompt = await post(pool, messages);
     expect(prompt).not.toContain("ORIGINAL_TASK_MARKER"); // no history replay
     expect(prompt).not.toContain("RESENDTOOLS");
-    // The recovery path re-sends the periodic reminder, not a separate file.
-    expect(prompt).toContain("I will execute it myself in the terminal");
+    // The recovery path re-sends the complete OpenCode system prompt.
+    const systemPrompt = readPromptFile("opencode-system.md");
+    expect(prompt).toContain(systemPrompt);
+    expect(prompt).toContain("# Execution model");
+    expect(prompt).toContain("# 6. Verification");
     expect(scripted.newConversations).toBe(rotations); // same conversation
   });
 
@@ -2062,7 +2066,7 @@ describe("RESENDTOOLS", () => {
       messages.push({ role: "user", content: command });
       const prompt = await post(pool, messages);
       expect(prompt).not.toContain("TASK_MARKER");
-      expect(prompt).toContain("I will execute it myself in the terminal");
+      expect(prompt).toContain(readPromptFile("opencode-system.md"));
       expect(scripted.newConversations).toBe(rotations);
     }
   });

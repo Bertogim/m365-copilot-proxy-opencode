@@ -251,10 +251,11 @@ const NOOP_SHELL_PROMPT = readPromptFile("nudges/noop-shell.md");
 
 const PERIODIC_TOOL_REMINDER = readPromptFile("periodic-tool-reminder.md");
 
-// SENDTOOLS / RESENDTOOLS re-sends the same reminder the periodic path uses, so
-// the recovery path and the cadence path can't drift into two descriptions of
-// the same contract.
-const TOOLS_RESEND_PROMPT = PERIODIC_TOOL_REMINDER;
+// SENDTOOLS / RESENDTOOLS re-sends the complete OpenCode system prompt. Read it
+// at request time so recovery also picks up prompt edits without a proxy restart.
+function toolsResendPrompt(): string {
+  return readPromptFile("opencode-system.md");
+}
 
 // M365 soft-caps output around ~3k tokens (~12k chars) and — critically —
 // CONCLUDES EARLY rather than truncating mid-stream, so a too-long answer comes
@@ -892,7 +893,7 @@ export async function handleChatCompletion(
   if (restoreTools) {
     // Same conversation, same server-side history: only the tool block/framing
     // with the nudge. No newConversation(), no replay.
-    text = toolNudge(TOOLS_RESEND_PROMPT);
+    text = toolNudge(toolsResendPrompt());
     inputImages = imageUrls(body.messages);
     log.info(`Chat completion: model=${model}, stream=${body.stream}, messages=${body.messages.length}, turn=${session.turnCount}, mode=restore-tools, cid=${convId}`);
   } else if (restoreContext || isFirstTurn || conv.sentMessageCount === 0) {
