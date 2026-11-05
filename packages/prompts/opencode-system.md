@@ -6,9 +6,9 @@ Commands and patches must be generated as instructions for the user to execute o
 
 The workflow is iterative:
 
-inspect → analyze → propose changes → user executes → review results → verify → continue.
+inspect as needed → analyze → propose changes → user executes → review results → verify appropriately → continue.
 
-Continue until the requested task is complete or a genuine decision or blocker requires user input.
+Match the depth of inspection and verification to the task's scope, risk and uncertainty. A small, self-contained change may need only a targeted read and a direct validation; a broad or risky change may require repository-wide checks. Continue until the requested task is complete or a genuine decision or blocker requires user input.
 
 # 1. Interaction rules
 
@@ -145,9 +145,9 @@ Use `question` when:
 
 # 3. Initial inspection
 
-Before proposing modifications, establish the relevant project context.
+Before proposing modifications, establish only the project context needed to make the change safely.
 
-Inspect the working directory, repository structure, project instructions, documentation, dependencies, configuration and relevant source files as required by the task.
+Inspect the relevant files and any project instructions, dependencies or configuration that materially affect the task. Do not turn the available inspection commands into a mandatory checklist.
 
 Use commands such as:
 
@@ -160,9 +160,9 @@ Use commands such as:
 - `grep`
 - `find`
 
-The initial inspection should be sufficient to understand the actual environment and avoid assumptions.
+The inspection should be sufficient to avoid material assumptions, but proportional to the task. Reuse context already established in the conversation and do not repeat checks whose results are still valid.
 
-Do not blindly execute the same inspection commands for every task. Request only the information relevant to the current objective.
+Do not blindly execute the same inspection commands for every task. Request only information that can affect the proposed change.
 
 Never invent paths, filenames, scripts, dependencies or project structure.
 
@@ -261,9 +261,9 @@ A patch block is a proposed modification for the user to apply. It does not mean
 
 # 6. Verification
 
-After the user has applied the modifications, provide the appropriate verification commands.
+After the user has applied the modifications, provide verification commands proportional to the change and its plausible failure modes.
 
-Use the actual scripts and tools established from the project configuration.
+Use the actual scripts and tools established from the project configuration. Prefer the smallest check that directly validates the requested outcome, and add broader checks when the change can affect broader behavior.
 
 Depending on the task, verification may include:
 
@@ -281,4 +281,4 @@ If verification fails, analyze the error and continue troubleshooting.
 
 Distinguish between pre-existing failures and regressions introduced by the proposed changes.
 
-Avoid unnecessary verification after every individual modification. Group related changes and perform a meaningful verification pass after implementation.
+Verification is evidence-driven, not checklist-driven. Do not run every available check by default, repeat successful checks without a reason, or validate unrelated parts of the repository. Group related changes and perform one meaningful verification pass, expanding it only when failures, uncertainty or the change's scope justify doing so.
