@@ -1645,7 +1645,7 @@ export async function handleChatCompletion(
             }] });
           }
         }
-        if (!delta || (blocked && !startedTool)) return;
+        if (!delta) return;
         pending += delta;
         if (couldBePriorityAccessPrefix(pending)) return;
         // Tool-mode retries may replace a refusal or a fabricated completion.
@@ -1682,8 +1682,7 @@ export async function handleChatCompletion(
               // input events. Arguments remain buffered and validated.
               const spec = buildSpecMap(body.tools ?? []).get(name);
               if (!startedTool && spec &&
-                  ["bash", "shell", "sh", "zsh", "run", "exec", "execute", "command", "cmd", "terminal", "run_command", "run_terminal_cmd", "execute_command", "execute_bash", "shell_exec", "system", "patch", "apply_patch", "edit", "write", "edit_file", "write_file"].includes(spec.name) &&
-                  pending.slice(0, match.index).trim() === "") {
+                  ["bash", "shell", "sh", "zsh", "run", "exec", "execute", "command", "cmd", "terminal", "run_command", "run_terminal_cmd", "execute_command", "execute_bash", "shell_exec", "system", "patch", "apply_patch", "edit", "write", "edit_file", "write_file"].includes(spec.name)) {
                 startedTool = {
                   id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
                   name: spec.name,
@@ -1714,6 +1713,10 @@ export async function handleChatCompletion(
           const partialTicks = /(?:^|\r?\n)[ \t]*`{1,3}$/.exec(pending);
           if (partialTicks) end = Math.min(end, partialTicks.index);
         }
+        // A suspected refusal must remain hidden while later deltas are still
+        // inspected for a real tool fence. If no fence starts a tool call, keep
+        // buffering so the existing retry/fail-closed logic can judge the turn.
+        if (blocked && !startedTool) return;
         if (markers.some(marker => lower.includes(marker.toLowerCase()))) blocked = true;
         // Delay tool-mode prose classification; never show a raw tool block.
         if (hasTools && pending.length < 48 && !blocked) return;

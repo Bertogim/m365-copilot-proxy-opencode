@@ -1668,6 +1668,33 @@ describe("incremental streaming with workspace tools", () => {
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 
+  it("starts native shell input after already-streamed prose and carries a heredoc", async () => {
+    const preamble = "Ejecuta este bloque completo en la carpeta donde están los PDF:\n\n";
+    const chunks = await collect([
+      preamble,
+      "```bash\n",
+      "python3 - <<'PY'\n",
+      'print("ok")\n',
+      "PY\n",
+      "```",
+    ]);
+
+    const content = chunks
+      .map(chunk => chunk.choices?.[0]?.delta?.content ?? "")
+      .join("");
+    const calls = chunks.flatMap(
+      chunk => chunk.choices?.[0]?.delta?.tool_calls ?? [],
+    );
+
+    expect(content).toBe("");
+    expect(calls[0].function.name).toBe("bash");
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(JSON.parse(calls.map(call => call.function.arguments).join(""))).toEqual({
+      command: "python3 - <<'PY'\nprint(\"ok\")\nPY",
+    });
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
   it("streams shell command arguments incrementally as valid JSON fragments", async () => {
     const chunks = await collect([
       "```bash\n",
