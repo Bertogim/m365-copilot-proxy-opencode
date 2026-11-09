@@ -695,8 +695,12 @@ function openPromptLog(body: ChatBody, conversationId?: string): PromptLog | nul
   try {
     mkdirSync(dir, { recursive: true });
     promptLogSeq += 1;
-    const base = (conversationId?.replace(/[^a-zA-Z0-9_-]/g, "_")
-      || `${new Date().toISOString().replace(/[:.]/g, "-")}-${String(promptLogSeq).padStart(3, "0")}`);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const sequence = String(promptLogSeq).padStart(6, "0");
+    const conversation = conversationId?.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const base = conversation
+      ? `${conversation}-${timestamp}-${process.pid}-${sequence}`
+      : `${timestamp}-${process.pid}-${sequence}`;
     writeFileSync(join(dir, `${base}-OUToriginal-turn00.json`), JSON.stringify({
       model: body.model,
       stream: body.stream,
@@ -767,7 +771,10 @@ function localTitleResponse(body: ChatBody, title: string): Response {
 export async function handleChatCompletion(
   body: ChatBody,
   pool: SessionPool,
-  opts: { signal?: AbortSignal } = {},
+  opts: {
+    signal?: AbortSignal;
+    useOpenCodeSystemPrompt?: boolean;
+  } = {},
 ): Promise<Response> {
   const localTitle = titleFromRequest(body);
   if (localTitle) {
@@ -843,7 +850,9 @@ export async function handleChatCompletion(
     if (restoreContext && args[0] === body.messages) {
       args[0] = restoredContextMessages(body.messages, args[4]);
     }
-    args[0] = applySystemPrompt(args[0]);
+    if (opts.useOpenCodeSystemPrompt !== false) {
+      args[0] = applySystemPrompt(args[0]);
+    }
     const output = formatCoreMessages(...args);
     if (promptLog) {
       promptTurn += 1;

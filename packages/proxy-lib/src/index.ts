@@ -138,7 +138,10 @@ export function createApp(sessionOptions: ModelSessionOptions = {}): FetchApp {
         );
       }
       // req.signal aborts when the client disconnects → cancels the M365 turn.
-      return withCors(await handleChatCompletion(body, pool, { signal: req.signal }));
+      return withCors(await handleChatCompletion(body, pool, {
+        signal: req.signal,
+        useOpenCodeSystemPrompt: req.headers.get("x-chat-client") !== "simple",
+      }));
     }
 
     return withCors(

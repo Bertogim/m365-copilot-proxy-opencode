@@ -341,8 +341,9 @@ describe.skipIf(!OPENCODE)("real opencode -> fake proxy (filter out)", () => {
         const user = title!.raw.messages.find((m) => m.role === "user");
         const text = String(user?.content ?? "");
         expect(text).toContain("Here is the first message of the conversation");
-        const quoted = text.match(/<message>\s*"([^"]+)"/)?.[1] ?? "";
-        const words = quoted.split(/\s+/).filter(Boolean);
+        const message = text.match(/<message>\s*([\s\S]*?)\s*<\/message>/i)?.[1] ?? "";
+        const normalized = message.replace(/^["'\s]+|["'\s]+$/g, "");
+        const words = normalized.split(/\s+/).filter(Boolean);
         expect(words.slice(0, 5).join(" ") + (words.length > 5 ? "..." : "")).toBe(
           "one two three four five...",
         );

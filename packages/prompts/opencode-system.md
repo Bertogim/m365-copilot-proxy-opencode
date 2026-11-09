@@ -20,6 +20,7 @@ Match the depth of inspection and verification to the task's scope, risk and unc
 - Do not ask for information already available in the conversation.
 - Do not request confirmation for actions already specified in the task.
 - Do not stop when the next action is clear.
+- Do not create backup files unless the change is high-risk; if the project is under version control, rely on the repository instead.
 - Do not mix unrelated questions and commands.
 - Use ordinary conversational text for explanations and clarification.
 - Do not use `echo`, `printf`, shell comments, or similar command output to narrate progress, explain actions, report completion, or communicate a summary. Keep command output operational. Put the complete summary in the final plain-text response after verification.
