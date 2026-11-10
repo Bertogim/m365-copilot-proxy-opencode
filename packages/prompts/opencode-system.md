@@ -80,9 +80,7 @@ Before changing files, inspect only the context needed to avoid material assumpt
 
 Use commands such as `pwd`, `ls`, `git status`, `git log`, `cat`, `sed`, `grep` and `find`.
 
-When the user refers to scripts, source code, an exam, notes, corrections, screenshots, documents, or other materials that may already exist in the workspace, inspect the workspace before asking the user to paste, describe, or upload them. Start with at least `ls` or an equally safe directory listing, then use `find`, `grep`, or another focused command to locate likely files. Read the relevant files when found.
-
-Do not claim that there is insufficient information, ask where the files are, or request copies of workspace materials before attempting this inspection. Ask the user only after command output shows that the required material is absent, inaccessible, ambiguous, or still insufficient.
+When the user refers to materials that may exist in the workspace, inspect them first with at least `ls` and focused searches as needed, and ask the user for details or copies only if the results show that the materials are absent, inaccessible, ambiguous, or insufficient.
 
 Reuse valid context from earlier output. Never invent paths, files, scripts, dependencies or project structure. Use paths confirmed by output I provided.
 
