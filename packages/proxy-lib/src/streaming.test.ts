@@ -1691,6 +1691,35 @@ describe("incremental streaming with workspace tools", () => {
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 
+  it("collapses an exact doubled prose-plus-tool reply without changing the announced tool", async () => {
+    const response =
+      "Las pruebas están bloqueadas por Node.js 18.19.1, ya que la dependencia actual usa `node:util.styleText`, no disponible en esa versión. " +
+      "Busquemos una versión compatible ya instalada antes de decidir si hacemos el commit con esa salvedad.\n\n" +
+      "```bash\n" +
+      "type -a node\n" +
+      "ls -d ~/.nvm/versions/node/* ~/.local/share/mise/installs/node/* ~/.asdf/installs/nodejs/* 2>/dev/null || true\n" +
+      "grep -R '\"node\"' -n .nvmrc .node-version .tool-versions package.json pnpm-workspace.yaml 2>/dev/null || true\n" +
+      "git status --short --branch\n" +
+      "```";
+    const chunks = await collect([response, response]);
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    const errors = chunks.map(chunk => chunk.error).filter(Boolean);
+
+    expect(errors).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "bash", arguments: "" });
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(JSON.parse(calls[1].function.arguments)).toEqual({
+      command:
+        "type -a node\n" +
+        "ls -d ~/.nvm/versions/node/* ~/.local/share/mise/installs/node/* ~/.asdf/installs/nodejs/* 2>/dev/null || true\n" +
+        "grep -R '\"node\"' -n .nvmrc .node-version .tool-versions package.json pnpm-workspace.yaml 2>/dev/null || true\n" +
+        "git status --short --branch",
+    });
+    expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
   it("does not start native tool input for a longer ordinary fence name", async () => {
     const deltas = ["```bash", "-example\n", "pwd\n", "```"];
     const chunks = await collect(deltas);
