@@ -2138,6 +2138,8 @@ describe("synthetic proxy waiting indicator", () => {
             expect(prompt).toContain("I manually execute all terminal commands and filesystem changes.");
             expect(prompt).toContain("Every response must contain exactly one of these:");
             expect(prompt).toContain("- `bash` for terminal commands and inspection.");
+            expect(prompt).toContain("inspect the workspace before asking the user to paste, describe, or upload them");
+            expect(prompt).toContain("Start with at least `ls` or an equally safe directory listing");
           }
         }
       }

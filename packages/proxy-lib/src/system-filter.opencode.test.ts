@@ -5,14 +5,14 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readPromptFile } from "@m365-copilot/core";
-import { applySystemPrompt, stripHarnessPrompt } from "./system-filter.js";
+import { applySystemPrompt, retainedEnvironment, stripHarnessPrompt } from "./system-filter.js";
 
 const PROMPT = readPromptFile("opencode-system.md");
 
 /** The OpenCode release `packages/prompts/opencode-system.md` was seeded from.
  *  A different version is not a failure — it is a warning to re-capture the
  *  prompt before trusting it. Bump this when the capture is refreshed. */
-const KNOWN_OPENCODE_VERSION = "2.2.5";
+const KNOWN_OPENCODE_VERSION = "2.2.6";
 
 /** Anchors the harness prompt has carried in every version we captured. If they
  *  disappear, the prompt changed shape and `opencode-system.md` is stale. */
@@ -62,6 +62,46 @@ describe("system prompt filter", () => {
   it("is a no-op when disabled", () => {
     const messages = [{ role: "system", content: "harness" }, { role: "user", content: "hi" }];
     expect(applySystemPrompt(messages, null)).toEqual(messages);
+  });
+
+  it("retains only OpenCode's working directory, platform and Git status", () => {
+    const messages = [{
+      role: "system",
+      content: `OpenCode instructions that must be removed.
+Today's date: Tue Nov 10 2026
+<env>
+  Working directory: /home/user/project
+  Workspace root folder: /home/user/project
+  Is directory a git repo: yes
+  Platform: linux
+  Prefer /tmp/opencode over other temporary directories.
+</env>
+Tools and AGENTS instructions that must also be removed.`,
+    }, {
+      role: "user",
+      content: "inspect the project",
+    }];
+
+    expect(retainedEnvironment(messages)).toBe(
+      "# Environment\n\n" +
+      "Working directory: /home/user/project\n" +
+      "Platform: linux\n" +
+      "Is directory a git repo: yes",
+    );
+
+    const filtered = applySystemPrompt(messages, PROMPT);
+    const system = String(filtered[0]!.content);
+    expect(system).toBe(
+      `${PROMPT}\n\n# Environment\n\n` +
+      "Working directory: /home/user/project\n" +
+      "Platform: linux\n" +
+      "Is directory a git repo: yes",
+    );
+    expect(system).not.toContain("Workspace root folder");
+    expect(system).not.toContain("Today's date");
+    expect(system).not.toContain("Prefer /tmp/opencode");
+    expect(system).not.toContain("OpenCode instructions");
+    expect(system).not.toContain("<env>");
   });
 });
 
@@ -232,15 +272,39 @@ describe.skipIf(!OPENCODE)("real opencode -> fake proxy (filter out)", () => {
         if (missingAnchors.length > 0) {
           problems.push(`the harness prompt no longer contains ${missingAnchors.map((a) => JSON.stringify(a)).join(", ")}`);
         }
+        const requiredEnvironmentFields = [
+          "Working directory",
+          "Platform",
+          "Is directory a git repo",
+        ];
+        const missingEnvironmentFields = requiredEnvironmentFields.filter(
+          field => !new RegExp(`^[ \\t]*${field}:[ \\t]*\\S.+$`, "im").test(rawSystem),
+        );
+        if (missingEnvironmentFields.length > 0) {
+          problems.push(
+            `the OpenCode ${version} prompt is missing required environment fields: ` +
+            missingEnvironmentFields.map(field => JSON.stringify(field)).join(", "),
+          );
+        }
 
-        // 2. ...and the proxy replaced all of it with exactly our file.
+        // 2. ...and the proxy replaced it with our file plus only the three
+        // retained OpenCode environment facts.
         const systems = main.filtered.filter((m) => m.role === "system");
         if (systems.length !== 1) problems.push(`the filtered request carries ${systems.length} system messages (expected 1)`);
         if (main.filtered[0]?.role !== "system") problems.push("the filtered request does not start with the system message");
-        if (systems[0]?.content !== PROMPT) {
+        const expectedEnvironment = retainedEnvironment(main.raw.messages);
+        for (const field of requiredEnvironmentFields) {
+          if (!new RegExp(`^${field}:[ \\t]*\\S.+$`, "im").test(expectedEnvironment)) {
+            problems.push(`the filter did not retain OpenCode's ${JSON.stringify(field)} field`);
+          }
+        }
+        const expectedSystem = expectedEnvironment
+          ? `${PROMPT}\n\n${expectedEnvironment}`
+          : PROMPT;
+        if (systems[0]?.content !== expectedSystem) {
           problems.push(
-            "the filtered system message is NOT packages/prompts/opencode-system.md verbatim " +
-              `(got ${textOf(systems[0]?.content).length} chars, expected ${PROMPT.length})`,
+            "the filtered system message is NOT packages/prompts/opencode-system.md plus the retained environment " +
+              `(got ${textOf(systems[0]?.content).length} chars, expected ${expectedSystem.length})`,
           );
         }
         if (main.filtered.some((m) => m.role === "developer")) problems.push("a developer message survived the filter");
@@ -280,7 +344,7 @@ describe.skipIf(!OPENCODE)("real opencode -> fake proxy (filter out)", () => {
           );
         }
 
-        expect(systems[0]!.content).toBe(PROMPT);
+        expect(systems[0]!.content).toBe(expectedSystem);
       } finally {
         server.close();
       }
