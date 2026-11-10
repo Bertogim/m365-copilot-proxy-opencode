@@ -49,7 +49,7 @@ import {
   type CapturedImage,
   type ParseResult,
 } from "@m365-copilot/core";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChatCompletionRequest } from "./schemas.js";
 import { applySystemPrompt } from "./system-filter.js";
@@ -685,7 +685,19 @@ const TITLE_REQUEST_MARKER = /You name conversations so the user can find them l
 // Prompt audit (iniciar-proxy.sh --logs): write the request the harness sent and
 // the exact text the proxy converts it into, so both sides can be diffed.
 type PromptLog = { dir: string; base: string };
-let promptLogSeq = 0;
+
+function nextPromptRequestNumber(dir: string, conversation: string): number {
+  let highest = 0;
+  const prefix = `${conversation}-`;
+  for (const filename of readdirSync(dir)) {
+    if (!filename.startsWith(prefix)) continue;
+    const match = /^(\d+)-\d+-/.exec(filename.slice(prefix.length));
+    if (!match) continue;
+    const number = Number(match[1]);
+    if (Number.isSafeInteger(number)) highest = Math.max(highest, number);
+  }
+  return highest + 1;
+}
 
 function openPromptLog(body: ChatBody, conversationId?: string): PromptLog | null {
   const dir =
@@ -694,21 +706,35 @@ function openPromptLog(body: ChatBody, conversationId?: string): PromptLog | nul
   if (!dir) return null;
   try {
     mkdirSync(dir, { recursive: true });
-    promptLogSeq += 1;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const sequence = String(promptLogSeq).padStart(6, "0");
-    const conversation = conversationId?.replace(/[^a-zA-Z0-9_-]/g, "_");
-    const base = conversation
-      ? `${conversation}-${timestamp}-${process.pid}-${sequence}`
-      : `${timestamp}-${process.pid}-${sequence}`;
-    writeFileSync(join(dir, `${base}-OUToriginal-turn00.json`), JSON.stringify({
+    const conversation = conversationId
+      ?.replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, 4) || "none";
+    const original = JSON.stringify({
       model: body.model,
       stream: body.stream,
       tool_choice: body.tool_choice,
       tools: body.tools ?? [],
       messages: body.messages,
-    }, null, 2));
-    return { dir, base };
+    }, null, 2);
+    // REQUEST is local to this conversation. A new conversation starts at
+    // 000001 instead of inheriting the highest request number from unrelated
+    // conversations already present in the shared log directory.
+    let requestNumber = nextPromptRequestNumber(dir, conversation);
+    for (;;) {
+      const request = String(requestNumber).padStart(6, "0");
+      const base = `${conversation}-${request}`;
+      try {
+        writeFileSync(
+          join(dir, `${base}-01-OUToriginal.json`),
+          original,
+          { flag: "wx" },
+        );
+        return { dir, base };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        requestNumber += 1;
+      }
+    }
   } catch {
     return null;
   }
@@ -853,16 +879,22 @@ export async function handleChatCompletion(
     if (opts.useOpenCodeSystemPrompt !== false) {
       args[0] = applySystemPrompt(args[0]);
     }
-    const output = formatCoreMessages(...args);
-    if (promptLog) {
-      promptTurn += 1;
-      writePromptLog(
-        promptLog,
-        `turn-${String(promptTurn).padStart(2, "0")}-OUTconverted.txt`,
-        output,
-      );
-    }
-    return output;
+    return formatCoreMessages(...args);
+  }
+
+  // Record the exact plain-text prompt immediately before each upstream run.
+  // Logging inside formatMessages missed delta turns because they use
+  // formatDeltaMessages directly, leaving only OUToriginal for those requests.
+  // Keeping this at the session.run boundary also records nudges and retries
+  // using the text that M365 actually receives.
+  function writeOutgoingPrompt(output: string): void {
+    if (!promptLog) return;
+    promptTurn += 1;
+    writePromptLog(
+      promptLog,
+      `${String(promptTurn).padStart(2, "0")}-OUTconverted.txt`,
+      output,
+    );
   }
   // A bare nudge ("Please continue.", a forcing retry) carries no <tools> block,
   // and the model is right to answer that it cannot act without one. Re-send the
@@ -1012,6 +1044,7 @@ export async function handleChatCompletion(
         // forcing retries included; run() calls the same wait before its reconnect.
         const waitForBudget = () => awaitTurnBudget({ signal: opts.signal, maxWaitMs: body.stream ? undefined : UNSTREAMED_BUDGET_WAIT_LIMIT_MS });
         await waitForBudget();
+        writeOutgoingPrompt(text);
         // Only attach the tool-calling agent when the request actually has tools.
         // The agent overrides `tone` (forces GPT-5), so tool-less requests must
         // skip it to reach the model the tone selects (e.g. Claude). See
@@ -1155,12 +1188,7 @@ export async function handleChatCompletion(
         if (promptLog) {
           rawTurn += 1;
           const suffix = String(rawTurn).padStart(2, "0");
-          writePromptLog(promptLog, `turn-${suffix}-INresponse.txt`, fullText);
-          writePromptLog(promptLog, `turn-${suffix}-INresponse.meta.json`, JSON.stringify({
-            model, tone, agent: useToolAgent, framing: framingVariant,
-            message_type: copilotStream.messageType ?? null,
-            turn_count: copilotStream.turnCount ?? null,
-          }, null, 2));
+          writePromptLog(promptLog, `${suffix}-INoriginal.txt`, fullText);
         }
         return { fullText };
       }
@@ -1552,8 +1580,71 @@ export async function handleChatCompletion(
   const includeUsage = !!body.stream_options?.include_usage;
   const usage = () => buildUsage(lastThrottle, lastContentOrigin, lastMessageType, lastScores, lastTurnCount, lastMetering, { prompt: promptTokens, completion: lastCompletionTokens });
 
+  function convertedLogBody(result: Produced): Record<string, unknown> {
+    const audit = {
+      request_streamed: !!body.stream,
+      model,
+      tone,
+      agent: useToolAgent,
+      framing: framingVariant,
+      message_type: lastMessageType ?? null,
+      turn_count: lastTurnCount ?? null,
+    };
+    if (result.kind === "error") {
+      return {
+        ...audit,
+        status: result.resp.status,
+        error: true,
+      };
+    }
+    if (result.kind === "tools") {
+      return {
+        ...audit,
+        id: completionId,
+        object: "chat.completion",
+        created,
+        choices: [{
+          index: 0,
+          message: {
+            role: "assistant",
+            content: null,
+            tool_calls: result.toolCalls,
+          },
+          finish_reason: "tool_calls",
+        }],
+        usage: usage(),
+      };
+    }
+    return {
+      ...audit,
+      id: completionId,
+      object: "chat.completion",
+      created,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: result.text,
+        },
+        finish_reason: outputFinishReason(result.text),
+      }],
+      usage: usage(),
+    };
+  }
+
+  function writeConvertedLog(result: Produced): void {
+    if (!promptLog) return;
+    const turn = String(rawTurn || promptTurn || 1).padStart(2, "0");
+    writePromptLog(
+      promptLog,
+      `${turn}-INconverted.json`,
+      JSON.stringify(convertedLogBody(result), null, 2),
+    );
+  }
+
   if (!body.stream) {
     const p = await produce();
+    writeConvertedLog(p);
     if (p.kind === "error") return p.resp;
     if (p.kind === "tools") {
       return jsonResponse(200, {
@@ -1630,9 +1721,7 @@ export async function handleChatCompletion(
       let sent = "";
       let pending = "";
       let blocked = false;
-      let startedTool: { id: string; name: string; bodyParam?: string } | undefined;
-      let streamedToolBody = 0;
-      let streamedToolArguments = "";
+      let startedTool: { id: string; name: string } | undefined;
       const markers = ["data:" + "image/", "iVBORw0KGgo", "/9j/", "UklGR", "!["];
       if (hasTools) markers.push("<tool_", "<invoke", "<function");
       const toolFenceNames = hasTools ? [...buildSpecMap(body.tools ?? []).keys()] : [];
@@ -1687,22 +1776,16 @@ export async function handleChatCompletion(
             if (!incomplete && name && toolFenceNames.includes(name)) {
               end = Math.min(end, match.index!);
               blocked = true;
-              // Start a real tool-input stream, not a synthetic status message.
-              // Announce opening command/editing fences through native tool
-              // input events. Arguments remain buffered and validated.
+              // Announce the detected tool immediately so OpenCode can show its
+              // native "preparing command/patch/question" state. Do not stream
+              // arguments: they remain buffered and are sent once, fully parsed
+              // and validated, after the upstream turn finishes.
               const spec = buildSpecMap(body.tools ?? []).get(name);
               if (!startedTool && spec &&
-                  ["bash", "shell", "sh", "zsh", "run", "exec", "execute", "command", "cmd", "terminal", "run_command", "run_terminal_cmd", "execute_command", "execute_bash", "shell_exec", "system", "patch", "apply_patch", "edit", "write", "edit_file", "write_file"].includes(spec.name) &&
-                  pending.slice(0, match.index).trim() === "") {
+                  ["bash", "shell", "sh", "zsh", "run", "exec", "execute", "command", "cmd", "terminal", "run_command", "run_terminal_cmd", "execute_command", "execute_bash", "shell_exec", "system", "patch", "apply_patch", "apply_diff", "edit", "write", "edit_file", "write_file", "question"].includes(spec.name)) {
                 startedTool = {
                   id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
                   name: spec.name,
-                  bodyParam:
-                    ["bash", "shell", "sh", "zsh", "run", "exec", "command", "cmd", "terminal", "run_command", "run_terminal_cmd", "execute_command", "execute_bash", "shell_exec", "system"].includes(spec.name) &&
-                    spec.bodyParam &&
-                    spec.headerParams.length === 0
-                      ? spec.bodyParam
-                      : undefined,
                 };
                 send({ ...base, choices: [{
                   index: 0,
@@ -1738,45 +1821,11 @@ export async function handleChatCompletion(
           // Marker-prefix holdback above is sufficient; do not delay every
           // ordinary token by a fixed 24-character tail.
         }
-        if (startedTool && blocked) {
-          const fenceMatch = pending.match(/^```[A-Za-z0-9_.-]+\s*\n([\s\S]*)$/);
-          if (fenceMatch && startedTool.bodyParam) {
-            const rawBody = fenceMatch[1];
-            const closingFence = /\r?\n```[ \t]*(?:\r?\n)?$/.exec(rawBody);
-            let stableEnd = closingFence?.index ?? rawBody.length;
-            if (!closingFence) {
-              for (const marker of ["\n```", "\r\n```"]) {
-                for (let size = 1; size <= marker.length; size++) {
-                  if (rawBody.endsWith(marker.slice(0, size))) {
-                    stableEnd = Math.min(stableEnd, rawBody.length - size);
-                  }
-                }
-              }
-            }
-            const stableBody = rawBody.slice(0, stableEnd);
-            const bodyDelta = stableBody.slice(streamedToolBody);
-            if (bodyDelta) {
-              const argumentDelta =
-                (streamedToolArguments.length === 0
-                  ? `{${JSON.stringify(startedTool.bodyParam)}:"`
-                  : "") +
-                JSON.stringify(bodyDelta).slice(1, -1);
-              streamedToolBody = stableBody.length;
-              streamedToolArguments += argumentDelta;
-              try {
-                send({ ...base, choices: [{
-                  index: 0,
-                  delta: { tool_calls: [{
-                    index: 0,
-                    function: { arguments: argumentDelta },
-                  }] },
-                  finish_reason: null,
-                }] });
-              } catch {}
-            }
-          }
-          return;
-        }
+        // Once a native tool has been announced, keep the raw fenced body
+        // buffered. Sending partial JSON arguments made OpenCode repeatedly
+        // redraw or corrupt the command editor. The complete arguments are
+        // emitted exactly once after parseReply validates the finished block.
+        if (startedTool && blocked) return;
         if (end <= sent.length) return;
         const content = pending.slice(sent.length, end);
         sent += content;
@@ -1797,17 +1846,7 @@ export async function handleChatCompletion(
           type: "tool_stream_mismatch",
         } }) };
       }
-      if (
-        startedTool &&
-        p.kind === "tools" &&
-        streamedToolArguments &&
-        !p.toolCalls[0].function.arguments.startsWith(streamedToolArguments)
-      ) {
-        p = { kind: "error", resp: jsonResponse(502, { error: {
-          message: "The final tool arguments diverged from their streamed prefix. The tool call was not committed.",
-          type: "tool_stream_mismatch",
-        } }) };
-      }
+      writeConvertedLog(p);
       clearInterval(hb);
       if (waitingTimer !== undefined) clearInterval(waitingTimer);
       try {
@@ -1832,11 +1871,10 @@ export async function handleChatCompletion(
           p.toolCalls.forEach((tc, i) => {
             log.debug(`Tool call: ${tc.function.name} ${trunc(tc.function.arguments, 200)}`);
             if (i === 0 && startedTool) {
-              const finalArgs = tc.function.arguments.slice(streamedToolArguments.length);
               send({ ...base, choices: [{
                 index: 0,
                 delta: { tool_calls: [{
-                  index: 0, function: { arguments: finalArgs },
+                  index: 0, function: { arguments: tc.function.arguments },
                 }] },
                 finish_reason: null,
               }] });

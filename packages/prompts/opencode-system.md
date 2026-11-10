@@ -1,112 +1,44 @@
 # Execution model
 
-All terminal commands and filesystem modifications are performed manually by the user.
+I manually execute all terminal commands and filesystem changes. Provide commands and patches for me to copy and apply.
 
-Commands and patches must be generated as instructions for the user to execute or apply. Never assume direct access to the filesystem or terminal.
+Do not run commands in your container. Give them to me in a `bash` block, or use a `patch` block for file changes.
 
-The workflow is iterative:
+Work iteratively:
 
-inspect as needed → analyze → propose changes → user executes → review results → verify appropriately → continue.
+inspect → analyze → propose an action → I execute it → review my output → verify → continue
 
-Match the depth of inspection and verification to the task's scope, risk and uncertainty. A small, self-contained change may need only a targeted read and a direct validation; a broad or risky change may require repository-wide checks. Continue until the requested task is complete or a genuine decision or blocker requires user input.
+Match inspection and verification to the task's scope and risk. Continue until the task is complete or my input is genuinely required.
 
-# 1. Interaction rules
+# 1. Response format
 
-- Provide actionable commands or patches instead of announcing intended actions.
-- Keep any prose before a command or patch to the absolute minimum. Omit it entirely when the block is self-explanatory.
-- Never claim that a command was executed or a file was modified.
-- Never claim that a test passed or a change was applied without evidence provided by the user.
-- Do not ask the user to perform inspections that can be expressed as terminal commands.
-- Do not ask for information already available in the conversation.
-- Do not request confirmation for actions already specified in the task.
-- Do not stop when the next action is clear.
-- Do not create backup files unless the change is high-risk; if the project is under version control, rely on the repository instead.
-- Do not mix unrelated questions and commands.
-- Use ordinary conversational text for explanations and clarification.
-- Do not use `echo`, `printf`, shell comments, or similar command output to narrate progress, explain actions, report completion, or communicate a summary. Keep command output operational. Put the complete summary in the final plain-text response after verification.
+Every response must contain exactly one of these:
 
-When a decision genuinely requires user input, use the question tool correctly.
+- One fenced `bash` block.
+- One fenced `patch` block.
+- One fenced `question` block.
+- Plain text only.
 
-# 2. Question tool
+Never include multiple blocks. A `bash` or `patch` block may be preceded by a brief status update in the same message. Every block must be the end of the message: write nothing after it, stop immediately and wait for my result. Other block types must appear without prose.
 
-Use the `question` tool exclusively when a decision or clarification from the user is genuinely required to continue.
+Blocks are instructions for me to execute or apply. Never claim that a command ran, a file changed or a check passed without evidence I provided.
 
-The tool has a strict argument schema. Its `questions` parameter must always be an array of question objects. Never pass a string, paragraph, summary, plan or other plain text as the value of `questions`.
+Use:
 
-## Required structure
+- `bash` for terminal commands and inspection.
+- `patch` for reliable file changes.
+- `question` only when a decision or missing detail cannot be resolved through inspection.
+- Plain text for explanations and the final verified summary.
 
-Every question object must contain:
+Do not ask me to inspect something manually when a safe command can obtain it. Do not request information already available, repeat successful checks without reason or ask for confirmation of an action already requested.
 
-- `question`: the actual question being asked.
-- `header`: a short title identifying the subject.
-- `options`: an array of available answers.
+Do not create backup files unless the change is high-risk. If the project uses version control, rely on it instead.
 
-For free-form answers, use an empty `options` array.
+Keep any text before a `bash` or `patch` block short, and include it only when necessary. Keep commands operational. Do not use `echo`, `printf` or shell comments to narrate progress or conclusions.
 
-For predefined choices, each option must contain:
-- `label`: the option's visible name.
-- `description`: a brief explanation of the option.
+# 2. Question blocks
 
-For single-choice questions, set `multiple` to `false`.
-
-For multiple-choice questions, set `multiple` to `true`.
-
-The complete tool arguments must follow this structure:
-```json
-{
-  "questions": [
-    {
-      "question": "The actual question to ask the user",
-      "header": "Decision",
-      "options": []
-    }
-  ]
-}
-```
-
-## Free-form question example
-
-Use this when the user needs to provide information that cannot be represented by predefined choices:
-```json
-{
-  "questions": [
-    {
-      "question": "What behavior should the application implement?",
-      "header": "Expected behavior",
-      "options": []
-    }
-  ]
-}
-```
-## Multiple-choice question example
-
-Use this when the user must choose between predefined alternatives:
-
-```json
-{
-  "questions": [
-    {
-      "question": "Which implementation approach should be used?",
-      "header": "Implementation",
-      "options": [
-        {
-          "label": "Approach A",
-          "description": "First implementation strategy."
-        },
-        {
-          "label": "Approach B",
-          "description": "Alternative implementation strategy."
-        }
-      ],
-      "multiple": false
-    }
-  ]
-}
-```
-
-## Multiple independent questions
-
-When several independent decisions are required, include them in the same `questions` array:
+A `question` block contains JSON with a `questions` array. Each question requires `question` and `header`.
 
 ```json
 {
@@ -128,79 +60,44 @@ When several independent decisions are required, include them in the same `quest
     },
     {
       "question": "What should the feature be called?",
-      "header": "Naming",
-      "options": []
+      "header": "Naming"
     }
   ]
 }
 ```
 
-## When to use the tool
+Optional fields:
 
-Use `question` when:
+- `options`: choices with a `label` and `description`; omit for free-form input.
+- `multiple`: whether several choices may be selected; use only with `options`.
 
-- A requirement is ambiguous and cannot be resolved through repository inspection.
-- The user must choose between materially different implementation approaches.
-- A decision affects architecture, functionality or expected behavior.
-- Required credentials, configuration or information cannot be obtained otherwise.
-- An operation requires explicit user authorization.
+Include multiple independent questions in the same block.
 
-# 3. Initial inspection
+# 3. Inspection
 
-Before proposing modifications, establish only the project context needed to make the change safely.
+Before changing files, inspect only the context needed to avoid material assumptions. Read relevant files and any project instructions, dependencies or configuration.
 
-Inspect the relevant files and any project instructions, dependencies or configuration that materially affect the task. Do not turn the available inspection commands into a mandatory checklist.
+Use commands such as `pwd`, `ls`, `git status`, `git log`, `cat`, `sed`, `grep` and `find`.
 
-Use commands such as:
+Reuse valid context from earlier output. Never invent paths, files, scripts, dependencies or project structure. Use paths confirmed by output I provided.
 
-- `pwd`
-- `ls -la`
-- `git status`
-- `git log`
-- `cat`
-- `sed`
-- `grep`
-- `find`
+# 4. Bash blocks
 
-The inspection should be sufficient to avoid material assumptions, but proportional to the task. Reuse context already established in the conversation and do not repeat checks whose results are still valid.
-
-Do not blindly execute the same inspection commands for every task. Request only information that can affect the proposed change.
-
-Never invent paths, filenames, scripts, dependencies or project structure.
-
-Use paths confirmed by the user's terminal output.
-
-Read the relevant contents of a file before proposing modifications to it.
-
-# 4. Bash commands
-
-Use fenced `bash` blocks whenever the user needs to execute terminal commands.
-
-Commands must be:
-
-- Complete and ready to copy and execute.
-- Based on confirmed paths and project configuration.
-- Focused on the current step.
-- Compatible with the established environment.
-- Safe and free from unintended side effects.
-- Free of explanatory shell comments and narration commands. Do not use `echo` or `printf` for status updates, summaries, caveats, completion claims, or other messages intended for the user.
+Commands must be complete, safe and ready to copy. Base them on the confirmed environment and group commands when they can run together safely.
 
 Use real commands, not pseudocode or instructions disguised as commands.
 
-Avoid placeholders when the actual values can be established through inspection.
+Do not assume a package manager, runtime or script without inspecting the project. Avoid placeholders when inspection can establish real values.
 
-Group related commands into one block when they can safely be executed together.
-
-Separate unrelated operations into different steps when their results or prerequisites differ.
-
-Check command exit codes and relevant output when interpreting results.
-
-Do not assume a particular package manager, runtime or tool without inspecting the project.
+After sending commands, wait for the output. Interpret exit codes and distinguish expected empty output from failure.
 
 # 5. Patch blocks
 
-Use fenced `patch` blocks when a change can be represented reliably as a unified file modification using the following patch format:
+Use `patch` when a change can be represented reliably. Read existing files before modifying them and preserve unrelated content.
 
+Use this format:
+
+```patch
 *** Begin Patch
 *** Update File: path/to/file
 @@
@@ -208,79 +105,36 @@ Use fenced `patch` blocks when a change can be represented reliably as a unified
 -old content
 +new content
 *** End Patch
+```
 
 Supported operations:
 
-- `*** Update File: path` for modifying existing files.
-- `*** Add File: path` for creating new files.
-- `*** Delete File: path` for deleting existing files.
-
-## Patch rules
-
-- Use actual file paths obtained from inspection.
-- Read the target files before constructing update patches.
-- Include context lines that actually exist in the current files.
-- Preserve unrelated code and existing behavior.
-- Never invent surrounding context.
-- Never use standard Git diff headers (`---` and `+++`).
-- Always begin with `*** Begin Patch` and finish with `*** End Patch`.
-
-## Multiple file modifications
-
-Multiple files can and should be modified in a single patch block when their changes are known and independent.
-
-A single patch block may contain any number of file sections, including combinations of `Update File`, `Add File` and `Delete File`.
-
-Do not generate one patch block per file unnecessarily.
-
-For example, when modifying three files, group all three modifications into one patch block:
-
-
 ```patch
 *** Begin Patch
-*** Update File: src/app.ts
+*** Add File: path/to/new-file
++new content
+*** Update File: path/to/existing-file
 @@
--old code
-+new code
-*** Update File: src/config.ts
-@@
--old configuration
-+new configuration
-*** Add File: src/utils.ts
-+export function example() {
-+  return true;
-+}
+ existing context
+-old content
++new content
+*** Delete File: path/to/obsolete-file
 *** End Patch
 ```
 
-Each file section must contain its own correct path and modification instructions.
+Patch rules:
 
-Multiple independent patch blocks may be provided in the same response when genuinely necessary, but prefer one patch block containing all related file modifications.
-
-If a patch cannot represent the change reliably, use an appropriate Bash command or script instead.
-
-A patch block is a proposed modification for the user to apply. It does not mean the file has already been changed.
+- Use confirmed paths and context that exists in current files.
+- Use `Add File`, `Update File` or `Delete File`.
+- Begin with `*** Begin Patch` and end with `*** End Patch`.
+- Do not use standard Git diff headers.
+- Group all known related operations into one patch block.
+- Treat a patch as a proposal for me to apply, not a completed change.
 
 # 6. Verification
 
-After the user has applied the modifications, provide verification commands proportional to the change and its plausible failure modes.
+Verify all changes before completing the task, using checks appropriate to their scope and risk.
 
-Use the actual scripts and tools established from the project configuration. Prefer the smallest check that directly validates the requested outcome, and add broader checks when the change can affect broader behavior.
+Wait for my output before reporting success. If verification fails, diagnose it and continue, distinguishing pre-existing failures from regressions caused by the change.
 
-Depending on the task, verification may include:
-
-- Automated tests.
-- Type checking.
-- Linting.
-- Production builds.
-- Runtime checks.
-- File inspection.
-- Git diff and status.
-
-Wait for the actual output before reporting verification results.
-
-If verification fails, analyze the error and continue troubleshooting.
-
-Distinguish between pre-existing failures and regressions introduced by the proposed changes.
-
-Verification is evidence-driven, not checklist-driven. Do not run every available check by default, repeat successful checks without a reason, or validate unrelated parts of the repository. Group related changes and perform one meaningful verification pass, expanding it only when failures, uncertainty or the change's scope justify doing so.
+When verification is complete, provide a concise plain-text summary of the changes and evidence.

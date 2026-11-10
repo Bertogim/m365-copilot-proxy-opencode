@@ -210,7 +210,25 @@ export class TurnTextComposer {
   }
 
   get text(): string {
-    return [...this.texts.values()].filter((t) => t.length > 0).join("\n\n");
+    let composed = "";
+    for (const text of this.texts.values()) {
+      if (!text) continue;
+      if (!composed) {
+        composed = text;
+        continue;
+      }
+      // M365 can replay the same logical response under a new messageId. While
+      // that replay is growing it is a prefix of the response already composed;
+      // once complete it may equal or extend it. Treat those shapes as one
+      // message so neither buffered nor live output repeats the whole answer.
+      if (composed.startsWith(text)) continue;
+      if (text.startsWith(composed)) {
+        composed = text;
+        continue;
+      }
+      composed += `\n\n${text}`;
+    }
+    return composed;
   }
 }
 

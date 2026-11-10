@@ -1649,7 +1649,7 @@ describe("incremental streaming with workspace tools", () => {
     const content = chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("");
     expect(content).toBe("");
     const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    expect(calls).toHaveLength(2);
     expect(calls[0].function.name).toBe("bash");
     expect(calls[0].function.arguments).toBe("");
     expect(calls[0].id).toMatch(/^call_/);
@@ -1663,13 +1663,13 @@ describe("incremental streaming with workspace tools", () => {
   it("waits for the complete shell header before starting native tool input", async () => {
     const chunks = await collect(["```bash", "\n", "pwd", "\n```"]);
     const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    expect(calls).toHaveLength(2);
     expect(calls[0].function).toEqual({ name: "bash", arguments: "" });
     expect(JSON.parse(calls.map(call => call.function.arguments).join(""))).toEqual({ command: "pwd" });
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 
-  it("streams shell command arguments incrementally as valid JSON fragments", async () => {
+  it("announces shell input early but delivers arguments once at the end", async () => {
     const chunks = await collect([
       "```bash\n",
       "pnpm ",
@@ -1682,7 +1682,9 @@ describe("incremental streaming with workspace tools", () => {
       .map(call => call.function.arguments)
       .filter((value): value is string => typeof value === "string" && value.length > 0);
 
-    expect(argumentChunks.length).toBeGreaterThan(2);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "bash", arguments: "" });
+    expect(argumentChunks).toHaveLength(1);
     expect(JSON.parse(argumentChunks.join(""))).toEqual({
       command: "pnpm test --filter proxy-lib",
     });
@@ -1710,7 +1712,7 @@ describe("incremental streaming with workspace tools", () => {
       }];
       const chunks = await collect(["``", "`" + fence, "\n", "pwd", "\n```"], false, requestTools);
       const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
-      expect(calls.length).toBeGreaterThanOrEqual(3);
+      expect(calls).toHaveLength(2);
       expect(calls[0].function).toEqual({ name: "shell", arguments: "" });
       expect(calls[0].id).toMatch(/^call_/);
       expect(calls[1].index).toBe(0);
@@ -1722,6 +1724,38 @@ describe("incremental streaming with workspace tools", () => {
       expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
     });
   }
+
+  it("announces question preparation without streaming its arguments", async () => {
+    const requestTools = [{
+      type: "function",
+      function: {
+        name: "question",
+        parameters: {
+          type: "object",
+          properties: { questions: { type: "array" } },
+        },
+      },
+    }];
+    const body = JSON.stringify({
+      questions: [{
+        question: "Which option should be used?",
+        header: "Choice",
+      }],
+    });
+    const chunks = await collect(
+      ["```question\n", body.slice(0, 20), body.slice(20), "\n```"],
+      false,
+      requestTools,
+    );
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "question", arguments: "" });
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(calls[1].id).toBeUndefined();
+    expect(calls[1].function.name).toBeUndefined();
+    expect(JSON.parse(calls[1].function.arguments)).toEqual(JSON.parse(body));
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
 
   for (const name of ["patch", "apply_patch", "edit", "write", "edit_file", "write_file"]) {
     it(`starts native ${name} input before delivering validated arguments`, async () => {
@@ -2101,9 +2135,9 @@ describe("synthetic proxy waiting indicator", () => {
             }
           } else {
             expect(prompt).not.toContain("Before the task, a note on how we'll work:");
-            expect(prompt).toContain("Provide actionable commands or patches instead of announcing intended actions.");
-            expect(prompt).toContain("The tool has a strict argument schema.");
-            expect(prompt).toContain("Use fenced `bash` blocks whenever the user needs to execute terminal commands.");
+            expect(prompt).toContain("I manually execute all terminal commands and filesystem changes.");
+            expect(prompt).toContain("Every response must contain exactly one of these:");
+            expect(prompt).toContain("- `bash` for terminal commands and inspection.");
           }
         }
       }
@@ -2194,7 +2228,7 @@ describe("synthetic proxy waiting indicator", () => {
     expect(chunks.slice(boundary).some(c =>
       c.choices?.[0]?.delta?.reasoning_content !== undefined)).toBe(false);
     const calls = chunks.flatMap(c => c.choices?.[0]?.delta?.tool_calls ?? []);
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    expect(calls).toHaveLength(2);
     expect(calls[0].function).toEqual({ name: "shell", arguments: "" });
     expect(JSON.parse(calls.map(call => call.function.arguments).join(""))).toEqual({ command: "pwd" });
     expect(chunks.map(c => c.choices?.[0]?.delta?.content ?? "").join("")).toBe("");

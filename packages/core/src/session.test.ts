@@ -192,6 +192,29 @@ describe("TurnTextComposer (multi-message turns)", () => {
     expect(compose(frames).streamed).toBe("alpha\nbeta");
   });
 
+  it("does not duplicate a response replayed under a different message id", () => {
+    const response = "Las dos compilaciones pasan.\n\n```bash\ngit status --short\n```";
+    const r = compose([
+      { cursor: cur("m1"), s: response, id: "m1" },
+      { cursor: cur("m2"), s: response, id: "m2" },
+    ]);
+    expect(r.text).toBe(response);
+    expect(r.answer).toBe(response);
+    expect(r.streamed).toBe(response);
+  });
+
+  it("suppresses a growing replay and emits only its new suffix", () => {
+    const r = compose([
+      { cursor: cur("m1"), s: "same answer", id: "m1" },
+      { cursor: cur("m2"), s: "same", id: "m2" },
+      { d: " answer" },
+      { d: " with addition" },
+    ]);
+    expect(r.text).toBe("same answer with addition");
+    expect(r.answer).toBe("same answer with addition");
+    expect(r.streamed).toBe("same answer with addition");
+  });
+
   it("routes deltas by cursor, not by whichever snapshot arrived last", () => {
     // A late final snapshot of message 1 lands after message 2's cursor; the
     // deltas that follow still belong to message 2.
