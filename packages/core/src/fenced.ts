@@ -822,7 +822,11 @@ const FENCE_CLOSE = /^[ \t]*```[ \t]*$/;
 // prose then an opener on one line ("Running it: ```bash"), and a closer glued
 // to the last line of the body ("ls -la```"). Only honoured at the outermost
 // level, where they can't be mistaken for nesting.
-const FENCE_OPEN_MIDLINE = /```([A-Za-z0-9_.-]+)[ \t]*$/;
+// A mid-line opener must start like a real language/tool name. Without this,
+// prose ending in a literal sequence such as "sin cierre ```." was interpreted
+// as a fence named ".", causing the following real ```bash block to become
+// nested and disappear from tool parsing.
+const FENCE_OPEN_MIDLINE = /```([A-Za-z0-9_][A-Za-z0-9_.-]*)[ \t]*$/;
 const FENCE_CLOSE_GLUED = /\S```[ \t]*$/;
 
 interface FenceBlock {
@@ -953,8 +957,17 @@ function findUnclosedToolFence(
   const tail = text.slice(bodyStart);
   if (tail.includes("```")) return null; // closed: scanFences' case
   const inner = stripNativeCloser(tail, last[1]);
-  if (inner === null) return null; // no end marker: maybe a truncated reply
-  return { start: last.index, end: text.length, spec, inner };
+  // Patch replies are recoverable from their own unambiguous opening marker.
+  // Models sometimes finish the patch body but omit `*** End Patch`, the closing
+  // Markdown fence, or both. Treat that as a call so streaming clients don't see
+  // an announced patch turn into prose; parseFencedInner completes the patch
+  // marker below. Other tools still require a real fence/native closer because
+  // an unterminated command or file body may be dangerously truncated.
+  if (inner === null && !(
+    spec.fenceName === "patch" &&
+    /^[ \t]*\*\*\* Begin Patch[ \t]*$/m.test(tail)
+  )) return null;
+  return { start: last.index, end: text.length, spec, inner: inner ?? tail };
 }
 
 function makeCall(name: string, args: Record<string, unknown>): ParsedToolCall {
@@ -1206,6 +1219,13 @@ function headerTextValue(inline: string, more: string[]): string {
 
 /** Parse the inner text of one fenced block into an arguments object, schema-aware. */
 function parseFencedInner(spec: FencedToolSpec, inner: string): Record<string, unknown> | null {
+  if (
+    spec.fenceName === "patch" &&
+    /^[ \t]*\*\*\* Begin Patch[ \t]*$/m.test(inner) &&
+    !/^[ \t]*\*\*\* End Patch[ \t]*$/m.test(inner)
+  ) {
+    inner = `${inner.trimEnd()}\n*** End Patch`;
+  }
   const lines = inner.split("\n");
   const args: Record<string, unknown> = {};
 

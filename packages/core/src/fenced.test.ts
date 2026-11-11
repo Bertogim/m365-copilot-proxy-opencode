@@ -163,6 +163,55 @@ describe("canonical fence names (one vocabulary for M365)", () => {
     expect(JSON.parse(patch[0].function.arguments).patchText).toContain("*** Add File: a.txt");
   });
 
+  it("completes and parses a patch missing its end marker and closing fence", () => {
+    const map = buildSpecMap([applyPatch]);
+    const text = [
+      "Preparing the edit.",
+      "```patch",
+      "*** Begin Patch",
+      "*** Update File: a.txt",
+      "@@",
+      "-old",
+      "+new",
+    ].join("\n");
+    const { calls, leftover } = parseFencedToolCalls(text, map);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe("apply_patch");
+    expect(JSON.parse(calls[0].function.arguments).patchText).toBe(
+      "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch",
+    );
+    expect(leftover.trim()).toBe("Preparing the edit.");
+  });
+
+  it("parses a patch with its end marker but no closing Markdown fence", () => {
+    const map = buildSpecMap([applyPatch]);
+    const text = [
+      "Applying a generic configuration change.",
+      "",
+      "```patch",
+      "*** Begin Patch",
+      "*** Update File: config/example.conf",
+      "@@",
+      "-enabled=false",
+      "+enabled=true",
+      "*** End Patch",
+    ].join("\n");
+    const { calls, leftover } = parseFencedToolCalls(text, map);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe("apply_patch");
+    expect(JSON.parse(calls[0].function.arguments).patchText).toBe(
+      "*** Begin Patch\n" +
+      "*** Update File: config/example.conf\n" +
+      "@@\n" +
+      "-enabled=false\n" +
+      "+enabled=true\n" +
+      "*** End Patch",
+    );
+    expect(leftover.trim()).toBe("Applying a generic configuration change.");
+  });
+
   it("round-trips a call written under a canonical fence through the transcript", () => {
     const spec = deriveFencedSpec(writeFile);
     expect(renderFencedCall(spec, { path: "a.py", content: "print(1)" })).toContain("```write");
@@ -290,6 +339,24 @@ describe("parseFencedToolCalls", () => {
     const { calls, leftover } = parseFencedToolCalls("Running it: ```bash\nls -la\n```", specs);
     expect(calls.map((c) => JSON.parse(c.function.arguments).command)).toEqual(["ls -la"]);
     expect(leftover.trim()).toBe("Running it:");
+  });
+
+  it("does not treat a literal ``` followed by punctuation as a fence opener", () => {
+    const text =
+      "The preceding example contains a literal fence followed by punctuation ```.\n\n" +
+      "```bash\n" +
+      "pwd\n" +
+      "```";
+    const { calls, leftover } = parseFencedToolCalls(text, specs);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe("bash");
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({
+      command: "pwd",
+    });
+    expect(leftover.trim()).toBe(
+      "The preceding example contains a literal fence followed by punctuation ```.",
+    );
   });
 
   it("drops an edit fence missing SEARCH/REPLACE markers", () => {
@@ -691,7 +758,7 @@ describe("harness notes (integrated, no OpenCode plugin)", () => {
 
   it("teaches the question array shape", () => {
     const out = readPromptFile("opencode-system.md");
-    expect(out).toContain("`questions` parameter must always be an array");
+    expect(out).toContain("A `question` block contains JSON with a `questions` array");
   });
 
   it("never names a tool the request doesn't carry", () => {

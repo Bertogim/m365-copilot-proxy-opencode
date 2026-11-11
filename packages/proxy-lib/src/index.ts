@@ -8,7 +8,13 @@ export {
   patchReminderDue,
   periodicToolReminderDue,
 } from "./handler.js";
-export { applySystemPrompt, stripHarnessPrompt, systemPromptOverride } from "./system-filter.js";
+export {
+  applySystemPrompt,
+  isOpenCodeCodeModeUpdate,
+  stripHarnessPrompt,
+  stripOpenCodeCodeModeUpdates,
+  systemPromptOverride,
+} from "./system-filter.js";
 export { ChatCompletionRequest, ChatMessage, ToolCall, ToolDefinition } from "./schemas.js";
 
 // Re-export tool utilities from core

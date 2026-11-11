@@ -52,7 +52,10 @@ import {
 import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ChatCompletionRequest } from "./schemas.js";
-import { applySystemPrompt } from "./system-filter.js";
+import {
+  applySystemPrompt,
+  stripOpenCodeCodeModeUpdates,
+} from "./system-filter.js";
 import type { z } from "zod/v4";
 
 const log = createLogger("handler");
@@ -706,22 +709,53 @@ const TITLE_REQUEST_MARKER = /You name conversations so the user can find them l
 
 // Prompt audit (iniciar-proxy.sh --logs): write the request the harness sent and
 // the exact text the proxy converts it into, so both sides can be diffed.
-type PromptLog = { dir: string; base: string };
+// Names use CONVERSATION-QUESTION-TURN-TYPE, with three numeric digits for both
+// question and turn.
+type PromptLog = {
+  dir: string;
+  conversation: string;
+  question: number;
+  firstTurn: number;
+  original: string;
+};
 
-function nextPromptRequestNumber(dir: string, conversation: string): number {
-  let highest = 0;
+function latestPromptPosition(
+  dir: string,
+  conversation: string,
+): { question: number; turn: number } {
+  let question = 0;
+  let turn = 0;
   const prefix = `${conversation}-`;
   for (const filename of readdirSync(dir)) {
     if (!filename.startsWith(prefix)) continue;
-    const match = /^(\d+)-\d+-/.exec(filename.slice(prefix.length));
+    const match = /^(\d{3})-(\d{3})-/.exec(filename.slice(prefix.length));
     if (!match) continue;
-    const number = Number(match[1]);
-    if (Number.isSafeInteger(number)) highest = Math.max(highest, number);
+    const candidateQuestion = Number(match[1]);
+    const candidateTurn = Number(match[2]);
+    if (
+      candidateQuestion > question ||
+      (candidateQuestion === question && candidateTurn > turn)
+    ) {
+      question = candidateQuestion;
+      turn = candidateTurn;
+    }
   }
-  return highest + 1;
+  return { question, turn };
 }
 
-function openPromptLog(body: ChatBody, conversationId?: string): PromptLog | null {
+function promptLogFilename(
+  target: PromptLog,
+  turn: number,
+  type: string,
+): string {
+  return `${target.conversation}-${String(target.question).padStart(3, "0")}-${String(turn).padStart(3, "0")}-${type}`;
+}
+
+function openPromptLog(
+  body: ChatBody,
+  conversationId: string | undefined,
+  startsNewQuestion: boolean,
+): PromptLog | null {
   const dir =
     process.env.M365_PROMPT_LOG_OUT_DIR?.trim()
     || process.env.M365_PROMPT_LOG_DIR?.trim();
@@ -738,23 +772,31 @@ function openPromptLog(body: ChatBody, conversationId?: string): PromptLog | nul
       tools: body.tools ?? [],
       messages: body.messages,
     }, null, 2);
-    // REQUEST is local to this conversation. A new conversation starts at
-    // 000001 instead of inheriting the highest request number from unrelated
-    // conversations already present in the shared log directory.
-    let requestNumber = nextPromptRequestNumber(dir, conversation);
+    let latest = latestPromptPosition(dir, conversation);
     for (;;) {
-      const request = String(requestNumber).padStart(6, "0");
-      const base = `${conversation}-${request}`;
+      const question = startsNewQuestion || latest.question === 0
+        ? latest.question + 1
+        : latest.question;
+      const turn = startsNewQuestion || latest.question === 0
+        ? 1
+        : latest.turn + 1;
+      const target: PromptLog = {
+        dir,
+        conversation,
+        question,
+        firstTurn: turn,
+        original,
+      };
       try {
         writeFileSync(
-          join(dir, `${base}-01-OUToriginal.json`),
+          join(dir, promptLogFilename(target, turn, "OUToriginal.json")),
           original,
           { flag: "wx" },
         );
-        return { dir, base };
+        return target;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        requestNumber += 1;
+        latest = latestPromptPosition(dir, conversation);
       }
     }
   } catch {
@@ -762,12 +804,36 @@ function openPromptLog(body: ChatBody, conversationId?: string): PromptLog | nul
   }
 }
 
-function writePromptLog(target: PromptLog, name: string, text: string): void {
+function writePromptLog(
+  target: PromptLog,
+  turn: number,
+  type: string,
+  text: string,
+): void {
   try {
-    writeFileSync(join(target.dir, `${target.base}-${name}`), text);
+    writeFileSync(
+      join(target.dir, promptLogFilename(target, turn, type)),
+      text,
+    );
   } catch {
     /* audit only */
   }
+}
+
+function reservePromptLogTurn(target: PromptLog, ordinal: number): number {
+  const turn = target.firstTurn + ordinal - 1;
+  if (ordinal > 1) {
+    try {
+      writeFileSync(
+        join(target.dir, promptLogFilename(target, turn, "OUToriginal.json")),
+        target.original,
+        { flag: "wx" },
+      );
+    } catch {
+      /* audit only */
+    }
+  }
+  return turn;
 }
 
 function titleFromRequest(body: ChatBody): string | null {
@@ -824,6 +890,16 @@ export async function handleChatCompletion(
     useOpenCodeSystemPrompt?: boolean;
   } = {},
 ): Promise<Response> {
+  // Preserve the request exactly as OpenCode sent it for prompt auditing, but
+  // remove its user-role Code Mode catalogue refreshes before fingerprints,
+  // continuity counts, question detection, full formatting or delta formatting.
+  // Filtering only inside applySystemPrompt is insufficient because continued
+  // turns use formatDeltaMessages directly.
+  const originalBody = body;
+  body = {
+    ...body,
+    messages: stripOpenCodeCodeModeUpdates(body.messages),
+  };
   const localTitle = titleFromRequest(body);
   if (localTitle) {
     log.info(`title request: serving "${localTitle}" locally — no M365 turn`);
@@ -831,7 +907,15 @@ export async function handleChatCompletion(
   }
   const conv = pool.resolve(body.messages, body.tools);
   const { session } = conv;
-  const promptLog = openPromptLog(body, session.conversationId);
+  const newClientMessages = body.messages.slice(conv.sentMessageCount || 0);
+  const startsNewQuestion =
+    conv.sentMessageCount === 0 ||
+    newClientMessages.some(message => message.role === "user");
+  const promptLog = openPromptLog(
+    originalBody,
+    session.conversationId,
+    startsNewQuestion,
+  );
   let promptTurn = 0;
   let rawTurn = 0;
   const restoreContext = requestsContextRestore(body.messages);
@@ -912,9 +996,11 @@ export async function handleChatCompletion(
   function writeOutgoingPrompt(output: string): void {
     if (!promptLog) return;
     promptTurn += 1;
+    const turn = reservePromptLogTurn(promptLog, promptTurn);
     writePromptLog(
       promptLog,
-      `${String(promptTurn).padStart(2, "0")}-OUTconverted.txt`,
+      turn,
+      "OUTconverted.txt",
       output,
     );
   }
@@ -1209,8 +1295,8 @@ export async function handleChatCompletion(
         inputImages = []; // on the server now: a forcing retry in this conversation needn't resend them
         if (promptLog) {
           rawTurn += 1;
-          const suffix = String(rawTurn).padStart(2, "0");
-          writePromptLog(promptLog, `${suffix}-INoriginal.txt`, fullText);
+          const turn = promptLog.firstTurn + rawTurn - 1;
+          writePromptLog(promptLog, turn, "INoriginal.txt", fullText);
         }
         return { fullText };
       }
@@ -1665,10 +1751,12 @@ export async function handleChatCompletion(
 
   function writeConvertedLog(result: Produced): void {
     if (!promptLog) return;
-    const turn = String(rawTurn || promptTurn || 1).padStart(2, "0");
+    const ordinal = rawTurn || promptTurn || 1;
+    const turn = promptLog.firstTurn + ordinal - 1;
     writePromptLog(
       promptLog,
-      `${turn}-INconverted.json`,
+      turn,
+      "INconverted.json",
       JSON.stringify(convertedLogBody(result), null, 2),
     );
   }

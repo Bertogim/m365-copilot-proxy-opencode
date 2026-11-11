@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { readPromptFile } from "@m365-copilot/core";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // Replace core's ModelSession with a scripted fake so we can exercise the handler's
 // streaming path with no auth/WebSocket. Everything else in core stays real.
@@ -1570,6 +1573,116 @@ describe("local history continuity regressions", () => {
     expect(sent).toContain("CORRECTED_OUTPUT_CONTEXT");
     expect(sent).toContain("TASK_CONTEXT_CORRECTION");
   });
+
+  it("drops OpenCode Code Mode system-updates from continued delta turns", async () => {
+    scripted.result = null;
+    scripted.texts = [];
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "Received." },
+    ];
+    const pool = new SessionPool();
+    const messages: any[] = [
+      { role: "user", content: "TASK_CONTEXT_CODE_MODE_FILTER: inspect the project." },
+    ];
+    const first = await ask(pool, messages);
+    messages.push(
+      { role: "assistant", content: null, tool_calls: first.tool_calls },
+      { role: "tool", tool_call_id: first.tool_calls[0].id, content: "/project" },
+      {
+        role: "user",
+        content: `<system-update>
+# Code Mode
+
+The tools listed below cannot be called directly: they only work as JavaScript inside the \`execute\` tool.
+
+The catalog is complete. Do not guess tool names.
+
+## Code Mode tools (call only inside \`execute\`)
+
+- opencode (8 tools)
+  - tools.opencode.models({})
+</system-update>`,
+      },
+      { role: "user", content: "ACTUAL_USER_CONTINUATION: list the source files." },
+    );
+
+    await ask(pool, messages);
+    const sent = scripted.texts.at(-1)!;
+    expect(sent).toContain("ACTUAL_USER_CONTINUATION");
+    expect(sent).not.toContain("<system-update>");
+    expect(sent).not.toContain("# Code Mode");
+    expect(sent).not.toContain("tools.opencode");
+    expect(sent).not.toContain("The catalog is complete");
+  });
+
+  it("numbers prompt logs by question and turn using three digits", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "m365-prompt-log-"));
+    const previousLogDir = process.env.M365_PROMPT_LOG_DIR;
+    process.env.M365_PROMPT_LOG_DIR = dir;
+    scripted.result = null;
+    scripted.queue = [
+      { fullText: "```bash\npwd\n```" },
+      { fullText: "```bash\nls\n```" },
+      { fullText: "First question complete." },
+      { fullText: "Second question complete." },
+    ];
+
+    try {
+      const pool = new SessionPool();
+      const messages: any[] = [
+        { role: "user", content: "FIRST_QUESTION: inspect the project." },
+      ];
+
+      const first = await ask(pool, messages);
+      messages.push(
+        { role: "assistant", content: null, tool_calls: first.tool_calls },
+        { role: "tool", tool_call_id: first.tool_calls[0].id, content: "/project" },
+      );
+
+      const second = await ask(pool, messages);
+      messages.push(
+        { role: "assistant", content: null, tool_calls: second.tool_calls },
+        { role: "tool", tool_call_id: second.tool_calls[0].id, content: "README.md" },
+      );
+
+      const completed = await ask(pool, messages);
+      messages.push(
+        { role: "assistant", content: completed.content },
+        { role: "user", content: "SECOND_QUESTION: summarize the result." },
+      );
+      await ask(pool, messages);
+
+      const files = readdirSync(dir).sort();
+      const types = [
+        "INconverted.json",
+        "INoriginal.txt",
+        "OUTconverted.txt",
+        "OUToriginal.json",
+      ];
+      const expected = [
+        ...types.map(type => `conv-001-001-${type}`),
+        ...types.map(type => `conv-001-002-${type}`),
+        ...types.map(type => `conv-001-003-${type}`),
+        ...types.map(type => `conv-002-001-${type}`),
+      ].sort();
+
+      expect(files).toEqual(expected);
+      expect(
+        readFileSync(join(dir, "conv-001-001-OUToriginal.json"), "utf8"),
+      ).toContain("FIRST_QUESTION");
+      expect(
+        readFileSync(join(dir, "conv-002-001-OUToriginal.json"), "utf8"),
+      ).toContain("SECOND_QUESTION");
+    } finally {
+      if (previousLogDir === undefined) {
+        delete process.env.M365_PROMPT_LOG_DIR;
+      } else {
+        process.env.M365_PROMPT_LOG_DIR = previousLogDir;
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 
@@ -1720,6 +1833,28 @@ describe("incremental streaming with workspace tools", () => {
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 
+  it("keeps a real bash call after prose containing a literal closing fence", async () => {
+    const response =
+      "This generic example contains a literal fence followed by punctuation ```.\n\n" +
+      "```bash\n" +
+      "pwd\n" +
+      "ls\n" +
+      "```";
+    const chunks = await collect([response]);
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    const errors = chunks.map(chunk => chunk.error).filter(Boolean);
+
+    expect(errors).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "bash", arguments: "" });
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(JSON.parse(calls[1].function.arguments)).toEqual({
+      command: "pwd\nls",
+    });
+    expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
   it("does not start native tool input for a longer ordinary fence name", async () => {
     const deltas = ["```bash", "-example\n", "pwd\n", "```"];
     const chunks = await collect(deltas);
@@ -1818,6 +1953,45 @@ describe("incremental streaming with workspace tools", () => {
       expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
     });
   }
+
+  it("finishes an announced patch when the model omits its end marker and closing fence", async () => {
+    const requestTools = [{
+      type: "function",
+      function: {
+        name: "patch",
+        parameters: {
+          type: "object",
+          properties: { patchText: { type: "string" } },
+          required: ["patchText"],
+        },
+      },
+    }];
+    const chunks = await collect([
+      "Applying a generic configuration change.\n\n```patch\n",
+      "*** Begin Patch\n",
+      "*** Update File: config/example.conf\n",
+      "@@\n",
+      "-enabled=false\n",
+      "+enabled=true",
+    ], false, requestTools);
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    const errors = chunks.map(chunk => chunk.error).filter(Boolean);
+
+    expect(errors).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "patch", arguments: "" });
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(JSON.parse(calls[1].function.arguments).patchText).toBe(
+      "*** Begin Patch\n" +
+      "*** Update File: config/example.conf\n" +
+      "@@\n" +
+      "-enabled=false\n" +
+      "+enabled=true\n" +
+      "*** End Patch",
+    );
+    expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
 
   it("continues streaming after an ordinary code example with a split header", async () => {
     const deltas = [

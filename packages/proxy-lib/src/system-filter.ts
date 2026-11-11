@@ -38,6 +38,32 @@ function messageText(content: unknown): string {
     .join("");
 }
 
+/**
+ * OpenCode injects Code Mode catalogue refreshes as `user` messages rather
+ * than system/developer messages. Match the complete wrapper plus several
+ * stable Code Mode anchors so ordinary user text mentioning Code Mode, tools
+ * or `<system-update>` is preserved.
+ */
+export function isOpenCodeCodeModeUpdate(message: PromptMessage): boolean {
+  if (message.role !== "user") return false;
+  const text = messageText(message.content).trim();
+  return (
+    text.startsWith("<system-update>") &&
+    text.endsWith("</system-update>") &&
+    /(?:^|\n)# Code Mode(?:\r?\n|$)/.test(text) &&
+    text.includes("The tools listed below cannot be called directly") &&
+    text.includes("The catalog is complete. Do not guess tool names.") &&
+    /(?:^|\n)## Code Mode tools \(call only inside `execute`\)(?:\r?\n|$)/.test(text)
+  );
+}
+
+/** Remove only OpenCode's user-role Code Mode catalogue refreshes. */
+export function stripOpenCodeCodeModeUpdates<T extends PromptMessage>(
+  messages: readonly T[],
+): T[] {
+  return messages.filter(message => !isOpenCodeCodeModeUpdate(message));
+}
+
 /** Keep only the three OpenCode environment facts needed by the agent. */
 export function retainedEnvironment(messages: readonly PromptMessage[]): string {
   const values = new Map<string, string>();
@@ -76,9 +102,14 @@ export function systemPromptOverride(): string | null {
   }
 }
 
-/** Drop every harness-owned control message (`system` and `developer`). */
+/**
+ * Drop harness-owned control messages: system/developer prompts and OpenCode's
+ * user-role Code Mode catalogue updates.
+ */
 export function stripHarnessPrompt<T extends PromptMessage>(messages: readonly T[]): T[] {
-  return messages.filter((message) => message.role !== "system" && message.role !== "developer");
+  return stripOpenCodeCodeModeUpdates(messages).filter(
+    message => message.role !== "system" && message.role !== "developer",
+  );
 }
 
 /** Replace the harness prompt with the single proxy-owned `system` message. */

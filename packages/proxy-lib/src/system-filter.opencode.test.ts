@@ -12,7 +12,7 @@ const PROMPT = readPromptFile("opencode-system.md");
 /** The OpenCode release `packages/prompts/opencode-system.md` was seeded from.
  *  A different version is not a failure — it is a warning to re-capture the
  *  prompt before trusting it. Bump this when the capture is refreshed. */
-const KNOWN_OPENCODE_VERSION = "2.2.6";
+const KNOWN_OPENCODE_VERSION = "2.2.7";
 
 /** Anchors the harness prompt has carried in every version we captured. If they
  *  disappear, the prompt changed shape and `opencode-system.md` is stale. */
@@ -57,6 +57,44 @@ describe("system prompt filter", () => {
     expect(filtered.map((m) => m.role)).toEqual(["system", "user", "assistant", "user"]);
     expect(filtered[0]!.content).toBe(PROMPT);
     expect(JSON.stringify(filtered)).not.toContain("<tools>");
+  });
+
+  it("drops only user-role system updates that carry OpenCode's Code Mode catalogue", () => {
+    const codeModeUpdate = `<system-update>
+# Code Mode
+
+The tools listed below cannot be called directly: they only work as JavaScript inside the \`execute\` tool.
+
+The catalog is complete. Do not guess tool names.
+
+## Code Mode tools (call only inside \`execute\`)
+
+- opencode (8 tools)
+  - tools.opencode.models({})
+</system-update>`;
+    const ordinaryUpdate = "<system-update>\nToday's date changed.\n</system-update>";
+    const userMention = "Please explain # Code Mode and the execute tool.";
+    const messages = [
+      { role: "system", content: "OpenCode harness prompt" },
+      { role: "user", content: "original task" },
+      { role: "user", content: codeModeUpdate },
+      { role: "assistant", content: "continuing" },
+      { role: "user", content: ordinaryUpdate },
+      { role: "user", content: userMention },
+    ];
+
+    const stripped = stripHarnessPrompt(messages);
+    expect(stripped.map(message => message.content)).toEqual([
+      "original task",
+      "continuing",
+      ordinaryUpdate,
+      userMention,
+    ]);
+
+    const filtered = applySystemPrompt(messages, PROMPT);
+    expect(JSON.stringify(filtered)).not.toContain("tools.opencode.models");
+    expect(JSON.stringify(filtered)).toContain("Today's date changed.");
+    expect(JSON.stringify(filtered)).toContain(userMention);
   });
 
   it("is a no-op when disabled", () => {
@@ -323,7 +361,7 @@ describe.skipIf(!OPENCODE)("real opencode -> fake proxy (filter out)", () => {
               JSON.stringify(userWire.slice(0, 400)),
           );
         }
-        if (main.filtered.length !== main.raw.messages.filter((m) => m.role !== "system" && m.role !== "developer").length + 1) {
+        if (main.filtered.length !== stripHarnessPrompt(main.raw.messages).length + 1) {
           problems.push("the filter dropped or duplicated conversation messages");
         }
 
