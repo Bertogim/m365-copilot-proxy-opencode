@@ -319,5 +319,5 @@
     }
   },
   "model": "m365/gpt-6.1-sol",
-  "small_model": "m365/gpt-6.1-sol"
+  "small_model": "m365/gpt-5.4"
 }

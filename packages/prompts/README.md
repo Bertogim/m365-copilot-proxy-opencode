@@ -14,7 +14,7 @@ resolved from `old/` by the framing builder, which no request path calls. Remind
 
 **OpenCode upgrades.** `system-filter.opencode.test.ts` runs the real `opencode` binary
 against a fake proxy. It warns when the binary version differs from the one the prompt was
-captured from (`KNOWN_OPENCODE_VERSION`, currently 2.2.5) and fails with a list of
+captured from (`KNOWN_OPENCODE_VERSION`, currently 2.3.0) and fails with a list of
 mismatches if the harness prompt changed shape, the filter no longer replaces it verbatim, or
 the user turn carries more than 150 chars of extra harness tags (e.g. a `<system-reminder>`). When
 that fires: re-capture the prompt (fake proxy + `opencode run --standalone`), update

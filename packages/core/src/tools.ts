@@ -322,6 +322,56 @@ export interface ParseResult {
   textContent: string | null;
 }
 
+/**
+ * Tolerance parser for an XML-like question wrapper occasionally emitted by
+ * chat models instead of the instructed Markdown fence:
+ *
+ *   <question>{"questions":[...]}</question>
+ *   <questions>{"questions":[...]}</questions>
+ *
+ * One duplicated opening angle bracket is accepted as well. Keep this strict:
+ * the wrapper must occupy the complete response, a compatible question tool
+ * must be present, and `questions` must actually be an array. This prevents
+ * ordinary XML examples or prose containing a tag from becoming tool calls.
+ */
+function parseWrappedQuestionCall(
+  text: string,
+  tools: ToolDef[] | undefined,
+): ParsedToolCall | null {
+  if (!tools?.length) return null;
+  const questionTool = tools.find(tool =>
+    /^(question|questions|ask_user|ask)$/i.test(tool.function.name),
+  );
+  if (!questionTool) return null;
+
+  const match = /^\s*<{1,2}(question|questions)>\s*([\s\S]*?)\s*<\/\1>\s*$/i.exec(text);
+  if (!match) return null;
+
+  try {
+    const decoded = JSON.parse(match[2]);
+    const args = Array.isArray(decoded)
+      ? { questions: decoded }
+      : decoded;
+    if (
+      !args ||
+      typeof args !== "object" ||
+      !Array.isArray((args as Record<string, unknown>).questions)
+    ) {
+      return null;
+    }
+    return {
+      id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+      type: "function",
+      function: {
+        name: questionTool.function.name,
+        arguments: JSON.stringify(args),
+      },
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Patterns of M365's stochastic turn-1 "give-up" confabulation: it claims it can't
 // see/run anything and asks the user to paste files, WITHOUT ever calling a tool —
 // even though the environment is real. Used to trigger a forcing retry (handler).
@@ -597,6 +647,15 @@ export function parseToolCalls(text: string, tools?: ToolDef[]): ParseResult {
     if (calls.length > 0) {
       return { hasToolCalls: true, toolCalls: calls, textContent: cleanLooseText(leftover) };
     }
+  }
+
+  const wrappedQuestion = parseWrappedQuestionCall(text, tools);
+  if (wrappedQuestion) {
+    return {
+      hasToolCalls: true,
+      toolCalls: [wrappedQuestion],
+      textContent: null,
+    };
   }
 
   // The spec map carries the shell aliases too, so a JSON call naming a leaked

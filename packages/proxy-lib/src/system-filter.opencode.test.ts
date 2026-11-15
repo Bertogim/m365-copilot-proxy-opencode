@@ -12,7 +12,7 @@ const PROMPT = readPromptFile("opencode-system.md");
 /** The OpenCode release `packages/prompts/opencode-system.md` was seeded from.
  *  A different version is not a failure — it is a warning to re-capture the
  *  prompt before trusting it. Bump this when the capture is refreshed. */
-const KNOWN_OPENCODE_VERSION = "2.2.7";
+const KNOWN_OPENCODE_VERSION = "2.3.0";
 
 /** Anchors the harness prompt has carried in every version we captured. If they
  *  disappear, the prompt changed shape and `opencode-system.md` is stale. */

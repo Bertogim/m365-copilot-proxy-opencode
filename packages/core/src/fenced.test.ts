@@ -212,6 +212,60 @@ describe("canonical fence names (one vocabulary for M365)", () => {
     expect(leftover.trim()).toBe("Applying a generic configuration change.");
   });
 
+  it("keeps Markdown fences added inside a patch instead of treating +``` as its close", () => {
+    const map = buildSpecMap([applyPatch]);
+    const ticks = "`".repeat(3);
+    const patchText = [
+      "*** Begin Patch",
+      "*** Delete File: README.md",
+      "*** Add File: README.md",
+      "+# OpenCode fork",
+      "+",
+      `+${ticks}sh`,
+      "+pnpm install",
+      `+${ticks}`,
+      "+",
+      "+## License",
+      "+MIT",
+      "*** End Patch",
+    ].join("\n");
+    const text = [
+      "Replacing the inherited README.",
+      `${ticks}patch`,
+      patchText,
+      ticks,
+    ].join("\n");
+    const { calls, leftover } = parseFencedToolCalls(text, map);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe("apply_patch");
+    expect(JSON.parse(calls[0].function.arguments).patchText).toBe(patchText);
+    expect(JSON.parse(calls[0].function.arguments).patchText).toContain("+## License");
+    expect(leftover.trim()).toBe("Replacing the inherited README.");
+  });
+
+  it("keeps deleted Markdown fence lines inside a patch too", () => {
+    const map = buildSpecMap([applyPatch]);
+    const ticks = "`".repeat(3);
+    const patchText = [
+      "*** Begin Patch",
+      "*** Update File: README.md",
+      "@@",
+      `-${ticks}sh`,
+      "-old command",
+      `-${ticks}`,
+      "+replacement text",
+      "*** End Patch",
+    ].join("\n");
+    const { calls } = parseFencedToolCalls(
+      `${ticks}patch\n${patchText}\n${ticks}`,
+      map,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0].function.arguments).patchText).toBe(patchText);
+  });
+
   it("round-trips a call written under a canonical fence through the transcript", () => {
     const spec = deriveFencedSpec(writeFile);
     expect(renderFencedCall(spec, { path: "a.py", content: "print(1)" })).toContain("```write");

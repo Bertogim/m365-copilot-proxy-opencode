@@ -1844,6 +1844,11 @@ export async function handleChatCompletion(
       const markers = ["data:" + "image/", "iVBORw0KGgo", "/9j/", "UklGR", "!["];
       if (hasTools) markers.push("<tool_", "<invoke", "<function");
       const toolFenceNames = hasTools ? [...buildSpecMap(body.tools ?? []).keys()] : [];
+      const questionTool = hasTools
+        ? body.tools?.find(tool =>
+            /^(question|questions|ask_user|ask)$/i.test(tool.function.name),
+          )
+        : undefined;
       const streamEverActed = body.messages.some(
         message => message.role === "assistant" &&
           Array.isArray(message.tool_calls) && message.tool_calls.length > 0,
@@ -1888,6 +1893,30 @@ export async function handleChatCompletion(
         // Re-evaluate incomplete headers on every delta instead of permanently
         // blocking the stream at the first backticks.
         if (hasTools) {
+          // Tolerate the XML-like question wrapper some models emit instead of
+          // the instructed ```question fence, including one accidental extra
+          // opening angle bracket. Hold the entire payload for final strict JSON
+          // validation in parseToolCalls, but announce the native question tool
+          // as soon as the complete opening tag is known.
+          const wrappedQuestion = /(?:^|\r?\n)\s*<{1,2}(?:question|questions)>/i.exec(pending);
+          if (wrappedQuestion && questionTool) {
+            end = Math.min(end, wrappedQuestion.index);
+            blocked = true;
+            if (!startedTool) {
+              startedTool = {
+                id: `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`,
+                name: questionTool.function.name,
+              };
+              send({ ...base, choices: [{
+                index: 0,
+                delta: { tool_calls: [{
+                  index: 0, id: startedTool.id, type: "function",
+                  function: { name: startedTool.name, arguments: "" },
+                }] },
+                finish_reason: null,
+              }] });
+            }
+          }
           const fences = /```([A-Za-z0-9_.-]*)([ \t]*)(\r?\n|$)/g;
           for (const match of pending.matchAll(fences)) {
             const name = match[1];

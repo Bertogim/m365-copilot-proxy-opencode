@@ -828,6 +828,11 @@ const FENCE_CLOSE = /^[ \t]*```[ \t]*$/;
 // nested and disappear from tool parsing.
 const FENCE_OPEN_MIDLINE = /```([A-Za-z0-9_][A-Za-z0-9_.-]*)[ \t]*$/;
 const FENCE_CLOSE_GLUED = /\S```[ \t]*$/;
+// Inside a patch, Markdown fences commonly appear as added/deleted lines:
+// `+```sh` opens one and `+```` closes it. The latter also matches the generic
+// glued-close shape above (`\S```$`), but it belongs to the patch body rather
+// than closing the outer ```patch fence. The same applies to deleted lines.
+const DIFF_MARKED_FENCE = /^[+-]```[ \t]*$/;
 
 interface FenceBlock {
   info: string;
@@ -876,7 +881,12 @@ function scanFences(text: string): FenceBlock[] {
       }
     } else if (opener) {
       depth++;
-    } else if (depth === 1 && open && FENCE_CLOSE_GLUED.test(line)) {
+    } else if (
+      depth === 1 &&
+      open &&
+      FENCE_CLOSE_GLUED.test(line) &&
+      !DIFF_MARKED_FENCE.test(line)
+    ) {
       const inner = text.slice(open.bodyStart, offset + line.trimEnd().length - 3);
       blocks.push({ info: open.info, inner, start: open.start, end: lineEnd });
       open = null;
@@ -1331,10 +1341,11 @@ export interface FencedParseResult {
 // lead-in made the document guard return it all as text and nothing ran; and
 // without the guard, one-call-per-turn would have run the first copy and told
 // the model its correction never ran. A restatement replaces the call before
-// it: same tool, nearly the same arguments (token Jaccard ≥ 0.85), a short gap
-// between them, and a sign it is a correction (the first copy carried native
-// markup, or the gap says so). Different commands, or the same one without
-// such a sign, stay two calls.
+// it: same tool, nearly the same arguments (token Jaccard ≥ 0.85), and a sign
+// it is a correction (the first copy carried native markup, the gap says so,
+// or the model repeated the whole preamble before emitting a slightly revised
+// call). Different commands, or the same one without such a sign, stay two
+// calls.
 const RESTATED_SIMILARITY = 0.85;
 const RESTATEMENT_GAP_CHARS = 300;
 const CORRECTION_WORDS = /\b(?:oops|sorry|apolog\w*|mistake|typo|wrong|malformed|broken|incorrect\w*|corrected|correctly|fixed|same command|re-?formatted|properly formatted|try(?:ing)? again|let me redo)\b/i;
@@ -1353,9 +1364,28 @@ function argTokens(args: Record<string, unknown>): Set<string> {
   return new Set(text.split(/\s+/).filter(Boolean));
 }
 
-function restates(prev: ToolFence, next: ToolFence, gap: string): boolean {
-  if (prev.name !== next.name || gap.trim().length > RESTATEMENT_GAP_CHARS) return false;
-  if (!prev.hadNativeCloser && !CORRECTION_WORDS.test(gap)) return false;
+function normalizedProse(text: string): string {
+  return text.trim().replace(/\s+/g, " ");
+}
+
+function repeatsWholePreamble(text: string, prev: ToolFence, next: ToolFence): boolean {
+  const preamble = normalizedProse(text.slice(0, prev.start));
+  const repeated = normalizedProse(text.slice(prev.end, next.start));
+  // A brief generic lead-in such as "Then:" is too weak a signal. Requiring a
+  // substantial, whole-response preamble makes this specific to M365's observed
+  // "draft + call, draft again + revised call" duplication failure.
+  return preamble.length >= 40 && repeated === preamble;
+}
+
+function restates(
+  prev: ToolFence,
+  next: ToolFence,
+  gap: string,
+  repeatedPreamble: boolean,
+): boolean {
+  if (prev.name !== next.name) return false;
+  if (!repeatedPreamble && gap.trim().length > RESTATEMENT_GAP_CHARS) return false;
+  if (!prev.hadNativeCloser && !CORRECTION_WORDS.test(gap) && !repeatedPreamble) return false;
   const a = argTokens(prev.args);
   const b = argTokens(next.args);
   const shared = [...a].filter((t) => b.has(t)).length;
@@ -1403,7 +1433,12 @@ function toolFences(text: string, specs: Map<string, FencedToolSpec>): ToolFence
     if (!args) continue;
     const fence: ToolFence = { start: block.start, end: block.end, name: spec.name, args, hadNativeCloser: stripped !== null };
     const prev = fences[fences.length - 1];
-    if (prev && restates(prev, fence, text.slice(prev.end, fence.start))) {
+    if (prev && restates(
+      prev,
+      fence,
+      text.slice(prev.end, fence.start),
+      repeatsWholePreamble(text, prev, fence),
+    )) {
       log.info(`Restated ${spec.name} call: running the corrected copy, not the first`);
       fences[fences.length - 1] = { ...fence, start: prev.start };
       continue;

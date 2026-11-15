@@ -1833,6 +1833,37 @@ describe("incremental streaming with workspace tools", () => {
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 
+  it("runs only the revised command when a repeated preamble precedes a near-duplicate call", async () => {
+    const preamble =
+      "The existing deployment helper accepts one archive, while the metadata updater verifies local attributes before changing the catalog.";
+    const first =
+      "cd /workspace/example\n" +
+      "tail -n 50 catalog.js\n" +
+      "find tests -maxdepth 1 -type f -iname '*bundle*' -o -iname '*metadata*' | sort\n" +
+      "sed -n '1,160p' tests/bundle.test.js\n" +
+      "git status --short";
+    const revised =
+      "cd /workspace/example\n" +
+      "tail -n 50 catalog.js\n" +
+      "find tests -maxdepth 1 -type f \\( -iname '*bundle*' -o -iname '*metadata*' \\) | sort\n" +
+      "sed -n '1,160p' tests/bundle.test.js\n" +
+      "git status --short";
+    const response =
+      `${preamble}\n\n\`\`\`bash\n${first}\n\`\`\`\n\n` +
+      `${preamble}\n\n\`\`\`bash\n${revised}\n\`\`\``;
+    const chunks = await collect([response]);
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    const errors = chunks.map(chunk => chunk.error).filter(Boolean);
+
+    expect(errors).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "bash", arguments: "" });
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(JSON.parse(calls[1].function.arguments)).toEqual({ command: revised });
+    expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
   it("keeps a real bash call after prose containing a literal closing fence", async () => {
     const response =
       "This generic example contains a literal fence followed by punctuation ```.\n\n" +
@@ -1921,6 +1952,54 @@ describe("incremental streaming with workspace tools", () => {
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });
 
+  it.each([
+    ["singular", "<question>", "</question>"],
+    ["plural", "<questions>", "</questions>"],
+    ["duplicated opening angle bracket", "<<question>", "</question>"],
+  ])("repairs a generic %s wrapped question without streaming raw markup", async (_name, open, close) => {
+    const requestTools = [{
+      type: "function",
+      function: {
+        name: "question",
+        parameters: {
+          type: "object",
+          properties: { questions: { type: "array" } },
+          required: ["questions"],
+        },
+      },
+    }];
+    const body = JSON.stringify({
+      questions: [{
+        question: "Which deployment target should be used?",
+        header: "Deployment",
+        options: [
+          {
+            label: "Staging",
+            description: "Deploy to the validation environment.",
+          },
+          {
+            label: "Production",
+            description: "Deploy to the live environment.",
+          },
+        ],
+        multiple: false,
+      }],
+    });
+    const chunks = await collect(
+      [open.slice(0, 2), open.slice(2), "\n", body.slice(0, 24), body.slice(24), "\n", close],
+      false,
+      requestTools,
+    );
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "question", arguments: "" });
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(JSON.parse(calls[1].function.arguments)).toEqual(JSON.parse(body));
+    expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
   for (const name of ["patch", "apply_patch", "edit", "write", "edit_file", "write_file"]) {
     it(`starts native ${name} input before delivering validated arguments`, async () => {
       const patchTool = name === "patch" || name === "apply_patch";
@@ -1989,6 +2068,54 @@ describe("incremental streaming with workspace tools", () => {
       "+enabled=true\n" +
       "*** End Patch",
     );
+    expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
+    expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
+  });
+
+  it("streams a complete patch whose added README contains Markdown fences", async () => {
+    const requestTools = [{
+      type: "function",
+      function: {
+        name: "apply_patch",
+        parameters: {
+          type: "object",
+          properties: { patchText: { type: "string" } },
+          required: ["patchText"],
+        },
+      },
+    }];
+    const ticks = "`".repeat(3);
+    const patchText = [
+      "*** Begin Patch",
+      "*** Delete File: README.md",
+      "*** Add File: README.md",
+      "+# OpenCode fork",
+      "+",
+      `+${ticks}sh`,
+      "+pnpm install",
+      "+pnpm build",
+      `+${ticks}`,
+      "+",
+      "+## License",
+      "+MIT",
+      "*** End Patch",
+    ].join("\n");
+    const chunks = await collect([
+      "Replacing the inherited README.\n\n",
+      `${ticks}patch\n`,
+      patchText.slice(0, 120),
+      patchText.slice(120),
+      `\n${ticks}`,
+    ], false, requestTools);
+    const calls = chunks.flatMap(chunk => chunk.choices?.[0]?.delta?.tool_calls ?? []);
+    const errors = chunks.map(chunk => chunk.error).filter(Boolean);
+
+    expect(errors).toEqual([]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0].function).toEqual({ name: "apply_patch", arguments: "" });
+    expect(calls[0].id).toMatch(/^call_/);
+    expect(JSON.parse(calls[1].function.arguments).patchText).toBe(patchText);
+    expect(JSON.parse(calls[1].function.arguments).patchText).toContain("+## License");
     expect(chunks.map(chunk => chunk.choices?.[0]?.delta?.content ?? "").join("")).toBe("");
     expect(chunks.at(-1).choices[0].finish_reason).toBe("tool_calls");
   });

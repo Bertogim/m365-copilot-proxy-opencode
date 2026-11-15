@@ -3,6 +3,81 @@ import { parseToolCalls, formatToolDefinitions, formatToolResponse, looksLikeCon
 import type { ToolDef } from "./tools.js";
 
 describe("parseToolCalls", () => {
+  const questionTool: ToolDef = {
+    type: "function",
+    function: {
+      name: "question",
+      description: "Ask the user one or more questions",
+      parameters: {
+        type: "object",
+        properties: { questions: { type: "array" } },
+        required: ["questions"],
+      },
+    },
+  };
+
+  it.each([
+    ["question", "<question>", "</question>"],
+    ["questions", "<questions>", "</questions>"],
+    ["duplicated opening angle bracket", "<<question>", "</question>"],
+  ])("parses a generic wrapped question using %s syntax", (_name, open, close) => {
+    const payload = {
+      questions: [{
+        question: "Which output format should be used?",
+        header: "Output format",
+        options: [
+          {
+            label: "Separate files",
+            description: "Create one independent file per item.",
+          },
+          {
+            label: "Combined archive",
+            description: "Create one archive containing all items.",
+          },
+        ],
+        multiple: false,
+      }],
+    };
+    const result = parseToolCalls(
+      `${open}\n${JSON.stringify(payload, null, 2)}\n${close}`,
+      [questionTool],
+    );
+
+    expect(result.hasToolCalls).toBe(true);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0].function.name).toBe("question");
+    expect(JSON.parse(result.toolCalls[0].function.arguments)).toEqual(payload);
+    expect(result.textContent).toBeNull();
+  });
+
+  it("accepts a question array directly inside the plural wrapper", () => {
+    const questions = [{
+      question: "Select a deployment target.",
+      header: "Target",
+      options: [],
+    }];
+    const result = parseToolCalls(
+      `<questions>${JSON.stringify(questions)}</questions>`,
+      [questionTool],
+    );
+
+    expect(JSON.parse(result.toolCalls[0].function.arguments)).toEqual({ questions });
+  });
+
+  it("does not turn an invalid or embedded question wrapper into a tool call", () => {
+    const invalid = parseToolCalls(
+      "<question>{\"questions\":\"not-an-array\"}</question>",
+      [questionTool],
+    );
+    const embedded = parseToolCalls(
+      "An XML example is <question>{\"questions\":[]}</question> in this paragraph.",
+      [questionTool],
+    );
+
+    expect(invalid.hasToolCalls).toBe(false);
+    expect(embedded.hasToolCalls).toBe(false);
+  });
+
   it("should parse a clean tool call with no extra text", () => {
     const input = '{"tool": "read_file", "arguments": {"path": "/etc/hostname"}}';
     const result = parseToolCalls(input);
@@ -306,6 +381,43 @@ describe("a call the model restates as a correction", () => {
     const parsed = parseToolCalls(giveUp, bashTool);
     expect(parsed.toolCalls).toHaveLength(2);
     expect(isProseDocument(parsed, giveUp, bashTool)).toBe(true);
+  });
+
+  it("keeps the revised call when the model repeats its preamble without calling it a correction", () => {
+    const preamble =
+      "The shared installer already accepts a compressed archive, so the packaging step will preserve both architecture directories. " +
+      "The catalog update will verify the local filename, size, and checksum before saving metadata.";
+    const first =
+      "cd /workspace/example\n" +
+      "tail -n 60 catalog.js\n" +
+      "find tests -maxdepth 1 -type f -iname '*archive*' -o -iname '*catalog*' | sort\n" +
+      "sed -n '1,180p' tests/archive.test.js\n" +
+      "git status --short";
+    const revised =
+      "cd /workspace/example\n" +
+      "tail -n 60 catalog.js\n" +
+      "find tests -maxdepth 1 -type f \\( -iname '*archive*' -o -iname '*catalog*' \\) | sort\n" +
+      "sed -n '1,180p' tests/archive.test.js\n" +
+      "git status --short";
+    const reply =
+      `${preamble}\n\n\`\`\`bash\n${first}\n\`\`\`\n\n` +
+      `${preamble}\n\n\`\`\`bash\n${revised}\n\`\`\``;
+
+    const parsed = parseToolCalls(reply, bashTool);
+    expect(parsed.toolCalls).toHaveLength(1);
+    expect(JSON.parse(parsed.toolCalls[0].function.arguments).command).toBe(revised);
+    expect(parsed.textContent).toBe(preamble);
+    expect(isProseDocument(parsed, reply, bashTool)).toBe(false);
+  });
+
+  it("does not merge similar calls merely because ordinary prose separates them", () => {
+    const first = "find src -type f -name '*.js' | sort";
+    const second = "find src -type f -name '*.ts' | sort";
+    const reply =
+      `I'll inspect the JavaScript files first.\n\n\`\`\`bash\n${first}\n\`\`\`\n\n` +
+      `Next I will inspect the TypeScript files.\n\n\`\`\`bash\n${second}\n\`\`\``;
+
+    expect(parseToolCalls(reply, bashTool).toolCalls).toHaveLength(2);
   });
 });
 
