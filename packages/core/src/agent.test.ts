@@ -1,12 +1,17 @@
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 
 vi.mock("./auth.js", () => ({ getTokenForScope: vi.fn().mockResolvedValue("synthetic-token") }));
-vi.mock("node:fs", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("node:fs")>()),
-  existsSync: vi.fn().mockReturnValue(false),
-  readFileSync: vi.fn(),
-  writeFileSync: vi.fn(),
-}));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    // The agent cache is faked (no writes to ~/.config); the prompt layer still
+    // needs real files, or getOrCreateAgent can't read its instructions.
+    existsSync: vi.fn((path: string) => path.endsWith(".md") && actual.existsSync(path)) as unknown as typeof actual.existsSync,
+    readFileSync: vi.fn((path: string) => actual.readFileSync(path, "utf8")) as unknown as typeof actual.readFileSync,
+    writeFileSync: vi.fn(),
+  };
+});
 import { environmentUrlFromName } from "./agent.js";
 
 describe("environmentUrlFromName", () => {
