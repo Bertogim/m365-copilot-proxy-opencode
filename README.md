@@ -44,6 +44,9 @@ ready-to-copy provider block for `~/.config/opencode/opencode.jsonc`:
 
 Full example with every model `/v1/models` serves (Claude Sonnet 5.5, Opus, Copilot, ...), using GPT-6.1 Sol as `model` and GPT-5.4 as `small_model`: [`examples/opencode.jsonc`](examples/opencode.jsonc).
 
+> `apiKey` is a placeholder unless you set `M365_PROXY_KEY` on the proxy, in which case it
+> must match. The proxy binds to `127.0.0.1` and refuses browser origins by default.
+
 `limit` mirrors each model's published window, and `/v1/models` advertises the
 same numbers (a test keeps `examples/opencode.jsonc` in sync): GPT-5.2 400k/128k,
 GPT-5.3 128k/16k, GPT-5.4 and newer 1.05M/128k, Claude 1M/128k. They drive
@@ -244,6 +247,23 @@ and their reload behaviour are documented in
 
 See all environment variables in the
 [upstream README](https://github.com/cramt/m365-copilot-proxy#environment-variables).
+
+## Access and security
+
+Anyone who can reach the port spends the signed-in M365 account, so the defaults are
+closed: `m365-proxy` binds to `127.0.0.1`, sends no CORS headers, and refuses any request
+carrying an `Origin` it wasn't told to trust (a 403, not just a missing header — CORS
+alone can't stop a request from being sent, and a DNS-rebound page is same-origin to the
+browser). CLI clients such as OpenCode send no `Origin` and are unaffected.
+
+| Variable | Effect |
+|---|---|
+| `HOST` / `NITRO_HOST` | Address the standalone `m365-proxy` binds. Default `127.0.0.1`; `0.0.0.0` listens on every interface. Anyone who reaches the port spends your M365 account, so pair that with `M365_PROXY_KEY`. |
+| `M365_PROXY_KEY` / `M365_PROXY_KEY_FILE` | When set, every request except `GET /health` must send the key as `Authorization: Bearer <key>` or `x-api-key: <key>` (401 otherwise). OpenCode sends its configured `apiKey` that way, so set the same value in `examples/opencode.jsonc`. The NixOS module's `apiKeyFile` sets the file variant. |
+| `M365_CORS_ORIGIN` | Comma-separated browser origins allowed to call the proxy, or `*` for any. Unset: no CORS headers are sent and any request with an `Origin` header gets a 403, which stops web pages (including DNS-rebinding ones) from driving your account. |
+
+The policy lives in `@m365-copilot/proxy-lib` (`access.ts`), so the Nitro server and the
+framework-free `createApp()` enforce the same rules.
 
 ## Relevant files
 
