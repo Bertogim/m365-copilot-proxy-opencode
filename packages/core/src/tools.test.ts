@@ -78,6 +78,45 @@ describe("parseToolCalls", () => {
     expect(embedded.hasToolCalls).toBe(false);
   });
 
+  it("parses a bare JSON question payload that occupies the whole response", () => {
+    const payload = {
+      questions: [{
+        question: "Which behaviour should be corrected?",
+        header: "Objective",
+        options: [
+          { label: "The chat does not open", description: "Y or Q does nothing." },
+          { label: "Messages are not sent", description: "They only appear locally." },
+        ],
+        multiple: false,
+      }],
+    };
+    const result = parseToolCalls(JSON.stringify(payload), [questionTool]);
+
+    expect(result.hasToolCalls).toBe(true);
+    expect(result.toolCalls).toHaveLength(1);
+    expect(result.toolCalls[0].function.name).toBe("question");
+    expect(JSON.parse(result.toolCalls[0].function.arguments)).toEqual(payload);
+    expect(result.textContent).toBeNull();
+  });
+
+  it("wraps a bare question array in the questions object", () => {
+    const questions = [{ question: "Pick one.", header: "Choice", options: [] }];
+    const result = parseToolCalls(JSON.stringify(questions), [questionTool]);
+
+    expect(result.hasToolCalls).toBe(true);
+    expect(JSON.parse(result.toolCalls[0].function.arguments)).toEqual({ questions });
+  });
+
+  it("does not turn JSON into a question call without the tool or outside the response", () => {
+    const noTool = parseToolCalls('{"questions":[]}', []);
+    const embedded = parseToolCalls('Example: {"questions":[]}', [questionTool]);
+    const other = parseToolCalls('{"other":[]}', [questionTool]);
+
+    expect(noTool.hasToolCalls).toBe(false);
+    expect(embedded.hasToolCalls).toBe(false);
+    expect(other.hasToolCalls).toBe(false);
+  });
+
   it("should parse a clean tool call with no extra text", () => {
     const input = '{"tool": "read_file", "arguments": {"path": "/etc/hostname"}}';
     const result = parseToolCalls(input);
