@@ -5753,3 +5753,9 @@ a section trim: date, `<env>`, AGENTS.md and skills are dropped too, by design.
 `system-filter.opencode.test.ts` drives the real `opencode` binary against a fake proxy
 (no M365 turn) and asserts the wire carries only the file. Live A/B still owed (n=0,
 throttled account); falsifier unchanged.
+
+**Update (2026-11-19).** Re-ran that check against opencode 2.3.2 (anchored on 2.3.0):
+the harness prompt still carries `OpenCode` / `system-reminder` / `# Harness`, exceeds
+2,000 chars, keeps the three retained env fields, and the wire still holds exactly one
+system message (our file) with a clean user turn — 6/6 green, no warning. No re-capture
+needed; `KNOWN_OPENCODE_VERSION` is now 2.3.2.
