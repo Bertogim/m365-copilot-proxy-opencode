@@ -5759,3 +5759,13 @@ the harness prompt still carries `OpenCode` / `system-reminder` / `# Harness`, e
 2,000 chars, keeps the three retained env fields, and the wire still holds exactly one
 system message (our file) with a clean user turn — 6/6 green, no warning. No re-capture
 needed; `KNOWN_OPENCODE_VERSION` is now 2.3.2.
+
+**Update (2026-11-19, delta refreshes).** A real captured turn (opencode 2.3.2) shows a
+second catalogue shape reaching M365: `<system-update>` starting with "The Code Mode tool
+catalog has changed." / "Changed tool listings supersede the previously listed ones:" and
+the delta `tools.opencode.*` entries, ending with `Today's date is now: …`. The old
+detector only knew the full `# Code Mode` catalogue, so it let the whole block through.
+`isOpenCodeCodeModeUpdate()` now matches both shapes and `stripOpenCodeCodeModeUpdates()`
+rewrites the message to a `<system-update>` holding just the date line (drops it entirely
+when there is no date). Unit-tested with the captured payload; re-running it through the
+built filter leaves exactly the date.

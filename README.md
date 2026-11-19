@@ -212,7 +212,8 @@ Before each upstream request, the proxy:
 1. retains the working directory, platform and Git-repository status from
    OpenCode's `system` and `developer` messages;
 2. removes those harness-owned messages;
-3. removes OpenCode's user-role Code Mode catalogue refreshes;
+3. removes OpenCode's user-role Code Mode catalogue refreshes (keeping the
+   `Today's date` line they carry);
 4. loads `packages/prompts/opencode-system.md`, or the custom path selected by
    `M365_SYSTEM_PROMPT`;
 5. appends the retained environment facts and sends the result as the only

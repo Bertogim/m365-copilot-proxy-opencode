@@ -38,30 +38,53 @@ function messageText(content: unknown): string {
     .join("");
 }
 
+/** Lines from a Code Mode refresh that the model still needs. OpenCode packs
+ *  the current date into the same `<system-update>` as the catalogue. */
+const DATE_LINE = /^[ \t]*Today's date(?: is now)?:.*$/gim;
+
 /**
  * OpenCode injects Code Mode catalogue refreshes as `user` messages rather
- * than system/developer messages. Match the complete wrapper plus several
- * stable Code Mode anchors so ordinary user text mentioning Code Mode, tools
- * or `<system-update>` is preserved.
+ * than system/developer messages. Two shapes have been captured: the full
+ * catalogue (`# Code Mode` … `## Code Mode tools`) and a delta refresh sent
+ * after a tool listing changes ("The Code Mode tool catalog has changed.").
+ * Match the complete wrapper plus stable anchors so ordinary user text
+ * mentioning Code Mode, tools or `<system-update>` is preserved.
  */
 export function isOpenCodeCodeModeUpdate(message: PromptMessage): boolean {
   if (message.role !== "user") return false;
   const text = messageText(message.content).trim();
-  return (
-    text.startsWith("<system-update>") &&
-    text.endsWith("</system-update>") &&
+  if (!text.startsWith("<system-update>") || !text.endsWith("</system-update>")) return false;
+  const fullCatalogue =
     /(?:^|\n)# Code Mode(?:\r?\n|$)/.test(text) &&
     text.includes("The tools listed below cannot be called directly") &&
     text.includes("The catalog is complete. Do not guess tool names.") &&
-    /(?:^|\n)## Code Mode tools \(call only inside `execute`\)(?:\r?\n|$)/.test(text)
-  );
+    /(?:^|\n)## Code Mode tools \(call only inside `execute`\)(?:\r?\n|$)/.test(text);
+  const deltaRefresh =
+    text.includes("The Code Mode tool catalog has changed.") &&
+    text.includes("Changed tool listings supersede the previously listed ones:") &&
+    /(?:^|\n)[ \t]*-[ \t]+tools\.opencode\./.test(text);
+  return fullCatalogue || deltaRefresh;
 }
 
-/** Remove only OpenCode's user-role Code Mode catalogue refreshes. */
+/**
+ * Remove OpenCode's user-role Code Mode catalogue refreshes, keeping any
+ * `Today's date` line they carry (`<system-update>` with just the date).
+ */
 export function stripOpenCodeCodeModeUpdates<T extends PromptMessage>(
   messages: readonly T[],
 ): T[] {
-  return messages.filter(message => !isOpenCodeCodeModeUpdate(message));
+  const kept: T[] = [];
+  for (const message of messages) {
+    if (!isOpenCodeCodeModeUpdate(message)) {
+      kept.push(message);
+      continue;
+    }
+    const dates = messageText(message.content).match(DATE_LINE);
+    if (!dates) continue;
+    const content = `<system-update>\n${dates.map(line => line.trim()).join("\n")}\n</system-update>`;
+    kept.push({ ...message, content } as T);
+  }
+  return kept;
 }
 
 /** Keep only the three OpenCode environment facts needed by the agent. */

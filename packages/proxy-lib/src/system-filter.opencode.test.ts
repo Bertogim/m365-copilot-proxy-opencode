@@ -97,6 +97,52 @@ The catalog is complete. Do not guess tool names.
     expect(JSON.stringify(filtered)).toContain(userMention);
   });
 
+  it("keeps the date but drops OpenCode's delta Code Mode catalogue refresh", () => {
+    const deltaUpdate = `<system-update>
+The Code Mode tool catalog has changed.
+
+Changed tool listings supersede the previously listed ones:
+  - tools.opencode.session_move({
+  /** Omit to move the current session. @pattern ^ses */
+  sessionID?: string,
+  /** Destination directory, relative to the target session's directory or absolute. Supports ~. @minLength 1 */
+  directory: string,
+}): Promise<{
+  /** @pattern ^ses */
+  sessionID: string,
+  directory: string,
+}> // Move a session to another directory, or omit sessionID to move the current session.
+
+Today's date is now: Thu Nov 19 2026
+</system-update>`;
+    const messages = [
+      { role: "user", content: "original task" },
+      { role: "user", content: deltaUpdate },
+      { role: "assistant", content: "continuing" },
+    ];
+
+    const stripped = stripHarnessPrompt(messages);
+    expect(stripped.map(message => message.content)).toEqual([
+      "original task",
+      "<system-update>\nToday's date is now: Thu Nov 19 2026\n</system-update>",
+      "continuing",
+    ]);
+    expect(JSON.stringify(stripped)).not.toContain("tools.opencode");
+
+    // Without a date there is nothing worth keeping, so the refresh goes away.
+    const undated = messages.map(message => message.content === deltaUpdate
+      ? { ...message, content: deltaUpdate.replace("\nToday's date is now: Thu Nov 19 2026", "") }
+      : message);
+    expect(stripHarnessPrompt(undated).map(message => message.content)).toEqual([
+      "original task",
+      "continuing",
+    ]);
+
+    // The same words inside ordinary prose are not a harness update.
+    const mention = { role: "user", content: 'Why did it say "The Code Mode tool catalog has changed."?' };
+    expect(stripHarnessPrompt([mention])).toEqual([mention]);
+  });
+
   it("is a no-op when disabled", () => {
     const messages = [{ role: "system", content: "harness" }, { role: "user", content: "hi" }];
     expect(applySystemPrompt(messages, null)).toEqual(messages);
