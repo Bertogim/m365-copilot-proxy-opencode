@@ -12,16 +12,17 @@ const PROMPT = readPromptFile("opencode-system.md");
 /** The OpenCode release `packages/prompts/opencode-system.md` was seeded from.
  *  A different version is not a failure — it is a warning to re-capture the
  *  prompt before trusting it. Bump this when the capture is refreshed. */
-const KNOWN_OPENCODE_VERSION = "2.3.2";
+const KNOWN_OPENCODE_VERSION = "2.4.1";
 
 /** Anchors the harness prompt has carried in every version we captured. If they
- *  disappear, the prompt changed shape and `opencode-system.md` is stale. */
-const HARNESS_ANCHORS = ["OpenCode", "system-reminder", "# Harness"];
+ *  disappear, the prompt changed shape and `opencode-system.md` is stale.
+ *  2.4.1 renamed the `<system-reminder>` tag to `<system-update>`. */
+const HARNESS_ANCHORS = ["OpenCode", "system-update", "# Harness"];
 
 /** The plain text the test asks OpenCode to send. */
 const USER_TEXT = "hello from the fake proxy test";
 
-/** How many extra chars of harness tags (system-reminder, env, ...) the user
+/** How many extra chars of harness tags (system-update, env, ...) the user
  *  turn may carry before the test calls it a leak. */
 const USER_TAG_BUDGET = 150;
 

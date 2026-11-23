@@ -5769,3 +5769,12 @@ detector only knew the full `# Code Mode` catalogue, so it let the whole block t
 rewrites the message to a `<system-update>` holding just the date line (drops it entirely
 when there is no date). Unit-tested with the captured payload; re-running it through the
 built filter leaves exactly the date.
+
+**Update (2026-11-23, opencode 2.4.1).** The prompt check caught one shape change: the
+harness prompt's tag for harness instructions is now `<system-update>` (it was
+`<system-reminder>` in 2.3.2). Everything else held — `OpenCode` / `# Harness` are still
+there, the prompt is 13,461 chars, the three retained env fields are present, and the wire
+still carries exactly one system message (our file) with a clean 30-char user turn. The
+anchor list now expects `system-update`, and `KNOWN_OPENCODE_VERSION` is 2.4.1. No
+re-capture of `opencode-system.md` was needed: the tag was only a harness sanity anchor,
+and the filter already keys on `<system-update>` for the Code Mode refreshes.
