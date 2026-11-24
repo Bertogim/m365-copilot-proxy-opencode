@@ -1,7 +1,8 @@
 # TODO — upstream changes selected for this fork (opencode-only)
 
-Status: **the refusal handling is implemented** (`b9699c1`); everything else is
-planned and unimplemented. Fork: `Bertogim/m365-copilot-proxy-opencode`.
+Status: **the refusal handling** (`b9699c1`) **and the account-wide daily turn
+limit** (`faa95a0`) **are implemented**; everything else is planned and
+unimplemented. Fork: `Bertogim/m365-copilot-proxy-opencode`.
 Upstream: `cramt/m365-copilot-proxy`.
 
 > The fork already has its own prompt and is tuned for opencode. Do not touch
@@ -38,7 +39,7 @@ conflicts with the fork's own implementation (these are not clean cherry-picks).
 | `fc998f4` | Restore what M365 strips (`[word]:`) and don't run a damaged PowerShell command | 1 day | Pending |
 | `f5e428a` | `reasoning_content` | 4-8 h | Pending |
 | `f2e723d` + `1b29ea4` | Long turns in parts | 2-4 days | Pending |
-| `ba10843` + `1365441` | Daily turn limit as an account-wide limit | 4-6 h | Pending |
+| `ba10843` + `1365441` | Daily turn limit as an account-wide limit | 4-6 h | **Done** (`faa95a0`) |
 
 ## Detail
 
@@ -94,7 +95,7 @@ conflicts with the fork's own implementation (these are not clean cherry-picks).
 
 ### Daily turn limit
 
-- [ ] **`ba10843` + `1365441`** — daily limit as an account-wide limit.
+- [x] **`ba10843` + `1365441`** — daily limit as an account-wide limit. **Done in `faa95a0`.**
   - **Difficulty:** hard · **Effort:** 4-6 h.
   - `TotalTurnUsageDaily` is remembered under one account key, 429 `daily_turn_quota_exhausted` with `Retry-After` to midnight UTC, no fallback.
   - `usage.x_m365_total_turns_daily_remaining` carries the turns left.
@@ -119,7 +120,7 @@ whole commit. Recommended order:
 4. Session and history (`bca4ea4`, `29e1e4d`, `7c63ed5`, `af794dc`).
 5. Stream and text (`96dfcf6`, `af12b33`, `fc998f4`).
 6. Context and reasoning (`f2e723d`, `1b29ea4`, `f5e428a`) — after session and history.
-7. Daily limit (`ba10843`, `1365441`).
+7. ~~Daily limit (`ba10843`, `1365441`).~~ **Done in `faa95a0`.**
 
-Total estimate: **5-9 days** of work, mostly in `f2e723d` + `1b29ea4` and
+Total estimate: **4-8 days** of work left, mostly in `f2e723d` + `1b29ea4` and
 `bca4ea4` + `29e1e4d`.
