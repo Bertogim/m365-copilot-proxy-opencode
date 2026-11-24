@@ -1,8 +1,9 @@
 # TODO — upstream changes selected for this fork (opencode-only)
 
-Status: **the refusal handling** (`b9699c1`) **and the account-wide daily turn
-limit** (`faa95a0`) **are implemented**; everything else is planned and
-unimplemented. Fork: `Bertogim/m365-copilot-proxy-opencode`.
+Status: **the refusal handling** (`b9699c1`), **account-wide daily turn
+limit** (`faa95a0`) **and new model mappings** (`fb4d3ac`) are implemented;
+everything else is planned and unimplemented. Fork:
+`Bertogim/m365-copilot-proxy-opencode`.
 Upstream: `cramt/m365-copilot-proxy`.
 
 > The fork already has its own prompt and is tuned for opencode. Do not touch
@@ -27,7 +28,7 @@ conflicts with the fork's own implementation (these are not clean cherry-picks).
 |---|---|---:|---|
 | `500a193` + `bc13a55` + `056acb9` + `ff057c7` | Refusals: token limit, Bing, apology | 3-4 h | **Done** (`b9699c1`) |
 | `e903b53` + `5bfdcf3` | Request body limits and deadline | 2-3 h | Pending |
-| `693dc2c` | New models (`gpt-6.2*`, `claude-fable`) | 1-2 h | Pending |
+| `693dc2c` | New models (`gpt-6.2*`, `claude-fable`) | 1-2 h | **Done** (`fb4d3ac`) |
 | `96dfcf6` + `af12b33` | Composer: doubled head and repeated `<` | 1-2 h | Pending |
 
 ### Hard
@@ -103,7 +104,7 @@ conflicts with the fork's own implementation (these are not clean cherry-picks).
 
 ### Models
 
-- [ ] **`693dc2c`** — add `gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6-astra` and `claude-fable`.
+- [x] **`693dc2c`** — add `gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6-astra` and `claude-fable`. **Done in `fb4d3ac`.**
   - **Difficulty:** easy · **Effort:** 1-2 h.
   - IDs, tones and defaults only; the fork's prompt stays as it is.
   - Check whether `relay_batch` makes sense for these tones under the fork's own contract.
@@ -116,7 +117,7 @@ whole commit. Recommended order:
 
 1. ~~Refusals (`500a193`, `bc13a55`, `056acb9`, `ff057c7`) — easy, no dependencies.~~ **Done in `b9699c1`.**
 2. Request body limits (`e903b53`, `5bfdcf3`) — easy, independent.
-3. Models (`693dc2c`) — easy, independent.
+3. ~~Models (`693dc2c`) — easy, independent.~~ **Done in `fb4d3ac`.**
 4. Session and history (`bca4ea4`, `29e1e4d`, `7c63ed5`, `af794dc`).
 5. Stream and text (`96dfcf6`, `af12b33`, `fc998f4`).
 6. Context and reasoning (`f2e723d`, `1b29ea4`, `f5e428a`) — after session and history.
