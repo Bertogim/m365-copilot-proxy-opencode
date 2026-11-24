@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import {
   activePriorityAccessExhaustion,
   couldBePriorityAccessPrefix,
+  DAILY_TURN_LIMIT_KEY,
   notePriorityAccessExhausted,
   meteredAllowance,
   parseMetering,
@@ -196,5 +197,43 @@ describe("remembering an exhaustion until its reset", () => {
     expect(activePriorityAccessExhaustion("gpt-6-sol", WED)).toBeNull();
     notePriorityAccessExhausted("gpt-6-sol", e, WED);
     expect(activePriorityAccessExhaustion("gpt-6-sol", WED)).toBe(e);
+  });
+});
+
+describe("the account's daily turn limit (TotalTurnDailyQuotaExhausted, §7)", () => {
+  const LIMIT = "You\u2019ve used your daily chat limit. Please try again tomorrow.";
+  const RESULT = { value: "OutOfCredits", message: LIMIT, errorCode: "TotalTurnDailyQuotaExhausted", creditScenario: "TotalTurn" };
+  afterEach(() => resetPriorityAccessState());
+
+  it("is account-scoped and resets at the next midnight UTC", () => {
+    const r = priorityAccessExhaustionOf(RESULT, LIMIT, WED)!;
+    expect(r.scope).toBe("account");
+    expect(r.window).toBe("day");
+    expect(r.resetsAt.toISOString()).toBe("2026-09-17T00:00:00.000Z");
+  });
+
+  it("goes by the error code, and by the text when the result is missing", () => {
+    expect(priorityAccessExhaustionOf({ ...RESULT, message: "reworded" }, "", WED)!.scope).toBe("account");
+    expect(priorityAccessExhaustionOf(null, LIMIT, WED)!.scope).toBe("account");
+  });
+
+  it("reads the text alone only on a turn that didn't succeed", () => {
+    const answer = `That message means: ${LIMIT} It resets at 00:00 UTC.`;
+    expect(priorityAccessExhaustionOf({ value: "Success", message: answer }, answer, WED)).toBeNull();
+    expect(priorityAccessExhaustionOf({ value: "InternalError" }, LIMIT, WED)!.scope).toBe("account");
+  });
+
+  it("leaves a model's priority-access cap model-scoped", () => {
+    expect(priorityAccessExhaustionOf({ value: "OutOfCredits", message: DAILY }, "", WED)!.scope).toBeUndefined();
+  });
+
+  it("holds the stream head while it could still be the refusal", () => {
+    expect(couldBePriorityAccessPrefix("You\u2019ve used your da")).toBe(true);
+    expect(couldBePriorityAccessPrefix("You\u2019ve used your daily chat limit.")).toBe(true);
+  });
+
+  it("is remembered under the account key", () => {
+    notePriorityAccessExhausted(DAILY_TURN_LIMIT_KEY, priorityAccessExhaustionOf(RESULT, "", WED)!, WED);
+    expect(activePriorityAccessExhaustion(DAILY_TURN_LIMIT_KEY, WED)?.scope).toBe("account");
   });
 });

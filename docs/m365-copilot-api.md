@@ -413,6 +413,25 @@ The final `type:2` frame carries the canonical state of the whole conversation i
 - This is why we **reuse one conversation** across an agent session and send **only new messages** on follow-up turns (delta mode) — every `Please continue.` retry also counts against the 600.
 - There is also opaque **account-level throttling** (rapid-fire requests can start returning empties). It recovers on its own.
 
+### The account's daily turn limit (`TotalTurnUsageDaily`)
+
+A non-premium ("Basic") account gets **50 chat turns per UTC day across every
+model**. The counter is `TotalTurnUsageDaily` in `throttling.metering`; past it
+M365 refuses each turn from `contentOrigin: "BotConnection"` with
+`result: {value: "OutOfCredits", errorCode: "TotalTurnDailyQuotaExhausted",
+creditScenario: "TotalTurn"}`, `turnState: "Failed"` and the text "You've used
+your daily chat limit. Please try again tomorrow." It refuses every chat model
+alike (so a fallback model doesn't help) and resets at midnight UTC. **Image
+generation still works past it.**
+
+The proxy remembers it once under the account key (`DAILY_TURN_LIMIT_KEY`),
+429s every chat model with `code: daily_turn_quota_exhausted` and `Retry-After`
+to midnight UTC, and never falls back. It goes by the result's `errorCode`; the
+refusal text alone counts only on a turn that didn't succeed, so an answer that
+quotes the text (a tool call that edits `priority-access.ts`, say) isn't taken
+for the wall. `usage.x_m365_total_turns_daily_remaining` carries the counter on
+every answered turn whose map has it.
+
 ### Account degradation under sustained use (observed June 13 2026)
 
 A full session of heavy use (~80+ messages across probes, bench runs, and logins
