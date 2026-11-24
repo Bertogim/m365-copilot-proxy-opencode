@@ -14,6 +14,7 @@ import {
   decodeJwt,
   getScenarioForModel,
   getToneForModel,
+  toneUsesWebSearch,
   type CopilotStream,
   type CapturedImage,
 } from "./copilot.js";
@@ -404,6 +405,7 @@ export class CopilotSession {
       let receivedContent = false;
       let throttleInfo: { current: number; max: number } | null = null;
       let contentOrigin: string | null = null;
+      let sawApology = false;
       let messageType: string | null = null;
       let messageId: string | null = null;
       // Highest per-component score across all messages this turn. The most
@@ -515,6 +517,9 @@ export class CopilotSession {
         },
         get contentOrigin() {
           return contentOrigin;
+        },
+        get apology() {
+          return sawApology;
         },
         get messageType() {
           return messageType;
@@ -750,10 +755,11 @@ export class CopilotSession {
               // run with M365_DUMP_FRAMES=1 to see what the server accepts.
               ...(nativeActions?.gptDefinitions ? { gptDefinitions: nativeActions.gptDefinitions } : {}),
               // plugins[]: an explicit native-action list wins; otherwise Bing on the
-              // plain (agent-less) path only, exactly as before.
+              // plain (agent-less) path only, exactly as before — unless Bing pushes
+              // this tone over its input limit on this account (toneUsesWebSearch).
               ...(nativeActions?.plugins
                 ? { plugins: nativeActions.plugins }
-                : (!agentId ? { plugins: [{ Id: "BingWebSearch", Source: "BuiltIn" }] } : {})),
+                : (!agentId ? { plugins: toneUsesWebSearch(tone) ? [{ Id: "BingWebSearch", Source: "BuiltIn" }] : [] } : {})),
               // Skill flags that gate the action/confirmation flow — the real client
               // sends these in the chat payload (bundle 8af68b68f4a2 destructure at
               // :9373-9378 → payload :11111). Without them the server has no reason to
@@ -881,6 +887,7 @@ export class CopilotSession {
               if (m.author !== "bot") continue;
               captureImages(m);
               if (m.contentOrigin) contentOrigin = m.contentOrigin;
+              if (m.contentOrigin === "Apology") sawApology = true;
               if (m.messageType) messageType = m.messageType;
               if (m.messageId) messageId = m.messageId;
               if (typeof m.turnCount === "number") turnCountServer = m.turnCount;
@@ -924,6 +931,7 @@ export class CopilotSession {
                 if (m.author === "bot") {
                   captureImages(m);
                   if (m.contentOrigin) contentOrigin = m.contentOrigin;
+                  if (m.contentOrigin === "Apology") sawApology = true;
                   if (m.messageType) messageType = m.messageType;
                   if (m.messageId) messageId = m.messageId;
                   if (m.scores) {

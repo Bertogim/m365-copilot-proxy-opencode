@@ -9,6 +9,8 @@ import {
   noteAgentRouteDead,
   noteAgentRouteAlive,
   isAgentRouteAlive,
+  noteWebSearchOverflow,
+  toneUsesWebSearch,
   PREMIUM_ONLY_AGENT_TONES,
   defaultFramingForModel,
   currentFramingVariant,
@@ -1116,6 +1118,7 @@ export async function handleChatCompletion(
     let agentRefreshed = false;
     let disengageRetried = false;
     let agentFallbackDone = false;
+    let webSearchFallbackDone = false;
     let priorityFallbackDone = false;
     let internalErrorFreshRetried = false;
     let originalText = text;
@@ -1223,6 +1226,37 @@ export async function handleChatCompletion(
         return { error: throttledResponse(copilotStream.result) };
       }
 
+      // An agent-less turn carries the Bing plugin, and on some accounts that
+      // alone pushes a tone over its input limit: GPT-6 and GPT-5.5 Think Deeper
+      // refuse a one-line prompt with it and serve without it. Remember
+      // that for the process, and re-send the WHOLE request without the plugin
+      // in a fresh conversation. At most once per request: a prompt that's
+      // really too long then fails fast below.
+      if (
+        !webSearchFallbackDone && !useToolAgent && toneUsesWebSearch(tone) &&
+        copilotStream.result?.value === "InvalidRequest" &&
+        copilotStream.result.errorCode === "InputTokenLimitExceeded"
+      ) {
+        webSearchFallbackDone = true;
+        noteWebSearchOverflow(tone);
+        session.newConversation();
+        text = formatMessages(body.messages, body.tools, body.tool_choice, session.conversationId, framingVariant);
+        inputImages = imageUrls(body.messages);
+        originalText = text;
+        log.info(`${tone} refused the prompt with the Bing plugin attached (InputTokenLimitExceeded) — re-sending without it in a fresh conversation`);
+        attempt--;
+        continue;
+      }
+
+      // M365 rejects a prompt over the model's input limit outright: no content,
+      // `result: InvalidRequest (InputTokenLimitExceeded)`. Any retry re-sends
+      // the same prompt, so fail fast and say what to cut.
+      if (copilotStream.result?.value === "InvalidRequest") {
+        noteRequestOutcome(false, convId);
+        log.info(`Upstream InvalidRequest (${copilotStream.result.errorCode ?? "no errorCode"}), prompt ${text.length} chars — 400, no retry`);
+        return { error: invalidRequestResponse(copilotStream.result, model, text.length) };
+      }
+
       // A tone whose agent route serves only on a premium account came back as
       // the dead route (`InternalError`, no content): this account isn't
       // premium. Remember that for the process, and re-send the WHOLE request
@@ -1286,6 +1320,28 @@ export async function handleChatCompletion(
         noteRequestOutcome(false, convId); // an answer, not a throttle
         log.info(`Priority access exhausted (${exhausted.window}) — resets ${exhausted.resetsAt.toISOString()}`);
         return { error: priorityAccessResponse(exhausted, model) };
+      }
+
+      // M365's prompt filter can answer with a canned apology instead of a
+      // Disengaged message: contentOrigin "Apology", "Sorry, it looks like I can't
+      // chat about this. Let's try a different topic." It is a Disengage-shaped
+      // refusal with text, and it reached the client as the model's answer. The final item
+      // restates that message under another origin, so read the turn's sticky
+      // `apology` flag. Retry it like a Disengage, once, in a fresh conversation;
+      // a second apology goes through as before. Tool requests only: they're
+      // buffered, so nothing has been streamed yet.
+      if (
+        (copilotStream.apology || copilotStream.contentOrigin === "Apology") &&
+        hasTools && !disengageRetried && !process.env.M365_NO_DISENGAGE_RETRY
+      ) {
+        disengageRetried = true;
+        session.newConversation();
+        const retryVariant = transcriptStyleForVariant(framingVariant).framingTag === "system" ? "softened" : framingVariant;
+        text = formatMessages(body.messages, body.tools, body.tool_choice, session.conversationId, retryVariant);
+        inputImages = imageUrls(body.messages);
+        log.info(`Upstream Apology (prompt filter) — retrying once with '${retryVariant}' framing in a fresh conversation (F22)`);
+        attempt--; // free retry; bounded — disengageRetried flips once
+        continue;
       }
 
       if (copilotStream.hasContent || fullText.length > 0) {
@@ -2167,6 +2223,24 @@ function rateLimitMessage(throttle: { current: number; max: number } | null): st
 
 function rateLimitResponse(throttle: { current: number; max: number } | null): Response {
   return jsonResponse(429, { error: { message: rateLimitMessage(throttle), type: "rate_limit_error" } });
+}
+
+/** M365 refused the turn as an invalid request; `InputTokenLimitExceeded` means
+ *  the prompt is too big for this model. A 400: re-sending it can't succeed. */
+function invalidRequestResponse(result: { errorCode?: string; message?: string }, model: string, promptChars: number): Response {
+  const tooLong = result.errorCode === "InputTokenLimitExceeded";
+  const message = tooLong
+    ? `M365 Copilot refused the prompt as too long for ${model} (InputTokenLimitExceeded; ${promptChars} characters sent). ` +
+      `Shorten the system prompt or the tool definitions, or use another model.`
+    : `M365 Copilot rejected the request (InvalidRequest${result.errorCode ? `: ${result.errorCode}` : ""})${result.message ? `: ${result.message}` : "."}`;
+  return jsonResponse(400, {
+    error: {
+      message,
+      type: "invalid_request_error",
+      code: tooLong ? "context_length_exceeded" : "m365_invalid_request",
+      ...(result.errorCode ? { param: result.errorCode } : {}),
+    },
+  });
 }
 
 /** M365 explicitly throttled the turn (`result.value: "Throttled"`). It names

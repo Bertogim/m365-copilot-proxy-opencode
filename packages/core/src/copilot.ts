@@ -430,6 +430,35 @@ export function requestUsesAgent(model: string, hasTools: boolean): boolean {
   return hasTools && toolRequestUsesAgent(getToneForModel(model));
 }
 
+// --- Bing on the agent-less path -------------------------------------------------
+//
+// An agent-less turn carries M365's Bing plugin (`BingWebSearch`), as the web
+// client's does. On some accounts that alone pushes a tone over its input
+// limit: on the test account GPT-6 and GPT-5.5 Think Deeper answer even a
+// one-line prompt with `InvalidRequest` / `InputTokenLimitExceeded` when the
+// plugin rides along, and serve it without (observed 2026-11-11). Elsewhere
+// these tones search fine, so the proxy learns it per tone at runtime, like
+// the dead agent route: the handler re-sends the refused request without the
+// plugin and records the tone here.
+const webSearchOverflowTones = new Set<string>();
+
+/** Record that the Bing plugin pushes `tone` over its input limit. Returns false if already known. */
+export function noteWebSearchOverflow(tone: string): boolean {
+  if (webSearchOverflowTones.has(tone)) return false;
+  webSearchOverflowTones.add(tone);
+  return true;
+}
+
+/** Whether an agent-less turn on this tone carries the Bing plugin. */
+export function toneUsesWebSearch(tone: string): boolean {
+  return !webSearchOverflowTones.has(tone);
+}
+
+/** Forget what was learned about the Bing plugin. For tests. */
+export function resetWebSearchOverflow(): void {
+  webSearchOverflowTones.clear();
+}
+
 /**
  * Whether this model ID is served only on a premium account (a paid Microsoft
  * 365 Copilot seat), on either path: on any other account every turn is the
@@ -551,6 +580,11 @@ export interface CopilotStream {
   throttle: { current: number; max: number } | null;
   /** `DeepLeo` (reasoning) / `3PDeclarativeAgent` (agent) / etc.  */
   contentOrigin?: string | null;
+  /** True if any bot message this turn came from `contentOrigin: "Apology"` — the
+   *  prompt filter's canned refusal ("Sorry, it looks like I can't chat about
+   *  this…"). `contentOrigin` keeps only the last message's origin, and the final
+   *  item restates the bot message under another one. */
+  apology?: boolean;
   /** Last seen messageType (e.g. `Disengaged`, `EndOfRequest`). Null when M365 sends an unmistakably content message. */
   messageType?: string | null;
   /** Server-assigned bot message id, useful for telemetry correlation. */
