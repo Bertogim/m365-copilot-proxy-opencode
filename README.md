@@ -42,14 +42,16 @@ ready-to-copy provider block for `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
-Full example with every model `/v1/models` serves (Claude Sonnet 5.5, Opus, Copilot, ...), using GPT-6.1 Sol as `model` and GPT-5.4 as `small_model`: [`examples/opencode.jsonc`](examples/opencode.jsonc).
+Full example with every model `/v1/models` serves (GPT-6.2 Sol/Astra, Claude
+Fable 5.1, Claude Sonnet 5.5, Opus, Copilot, ...), using GPT-6.1 Sol as `model`
+and GPT-5.4 as `small_model`: [`examples/opencode.jsonc`](examples/opencode.jsonc).
 
 > `apiKey` is a placeholder unless you set `M365_PROXY_KEY` on the proxy, in which case it
 > must match. The proxy binds to `127.0.0.1` and refuses browser origins by default.
 
 `limit` mirrors each model's published window, and `/v1/models` advertises the
 same numbers (a test keeps `examples/opencode.jsonc` in sync): GPT-5.2 400k/128k,
-GPT-5.3 128k/16k, GPT-5.4 and newer 1.05M/128k, Claude 1M/128k. They drive
+GPT-5.3 128k/16k, GPT-5.4 through GPT-6.2 1.05M/128k, Claude 1M/128k. They drive
 OpenCode's `% used` meter and its auto-compaction, so compaction fires when the
 real model window is nearly full. Unknown tones fall back to `M365_CONTEXT_WINDOW`
 / `M365_MAX_OUTPUT_TOKENS`. M365 does not expose token counts, so the proxy

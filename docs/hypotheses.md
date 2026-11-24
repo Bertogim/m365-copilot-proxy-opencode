@@ -98,6 +98,10 @@ than "we eyeballed one run." See §M (Methods) for the experimental rig.
   turn (F93); with it set on the proxy alone, 144 pi turns in 40 min, 42 at the floor, no throttle (F94);
   the bucket doesn't refill at 00:00Z like the priority-access budgets: without it, the account
   throttled 31 turns after 00:00Z (F95)
+- §44 — GPT-6.2 Sol, GPT-6.2 Astra, GPT-6 Astra and Claude Fable: the picker sends only the tone (F120);
+  all four serve on both transports, GPT-6 Astra gated like GPT-6 (F121); credits, and `Claude_Fable`
+  is Fable now (F122); harness runs and what shipped (F123); whether included `gpt-6.2-*` turns spend
+  the `GPT62*` budgets (H44a, open)
 
 ---
 
@@ -219,6 +223,10 @@ that opens it; program membership is not a string we can send.
 lies about which model answers — worse than not offering it. It lives in `scripts/tone-probe.mjs`
 only, probed on both scenarios so the day it starts self-identifying as Fable is visible in a
 routine sweep. **Falsify by:** a probe where `Claude_Fable` self-IDs as Fable — then map it.
+
+**Resolved 2026-11-18 (§44 F122): mapped as `claude-fable`.** Over StreamHub on 2026-11-11 it
+self-IDed as "Claude Fable 5.1"; on 2026-11-18 it reported a June 2026 training cutoff on both
+transports (GPT-5.5: June 2024), and its StreamHub turns were charged to Copilot credits.
 
 ## 11. July 7 2026 — flying under Microsoft's radar (auto-reauth detection science run)
 
@@ -5778,3 +5786,64 @@ still carries exactly one system message (our file) with a clean 30-char user tu
 anchor list now expects `system-update`, and `KNOWN_OPENCODE_VERSION` is 2.4.1. No
 re-capture of `opencode-system.md` was needed: the tag was only a harness sanity anchor,
 and the filter already keys on `<system-update>` for the Code Mode refreshes.
+
+## 44. Nov 18 2026 — GPT-6.2 Sol, GPT-6.2 Astra, GPT-6 Astra and Claude Fable
+
+**Question.** Microsoft added GPT-6.2 Sol, GPT-6.2 Astra and Claude Fable 5.2 to Copilot in the
+week to Nov 17, after announcing GPT-6 Astra and Claude Fable 5.1 as credit-billed models for
+Chat (MC1519122). Which tones are they, where do they serve, and can the proxy offer them?
+One premium account, as in §39–§41; one probe per cell unless noted.
+
+### F120 — the picker sends the tone and nothing else; Fable sends nothing 🟢
+
+The Chat picker on Nov 17–18 showed GPT-6.2 Sol and GPT-6.2 Astra ("Uses credits"). With the
+send blocked in Playwright, picking them sent `Gpt_62_Sol_Reasoning` and
+`Gpt_62_Astra_Reasoning`, respectively, with no other model field. Picking Fable 5.1 sent no
+tone, and the loaded client JavaScript had no `Claude_Fable`, so the browser route could not
+identify its tone. The proxy's direct StreamHub connection still worked.
+
+### F121 — all four serve; GPT-6 Astra is gated 🟢
+
+Agent-less Chathub probes, without Bing, and direct StreamHub probes established:
+
+| Tone | Included scenario | Paid scenario | StreamHub |
+|---|---|---|---|
+| `Gpt_62_Sol_Reasoning` | answers | not needed | answers |
+| `Gpt_62_Astra_Reasoning` | answers | not needed | answers |
+| `Gpt_6_Astra_Reasoning` | BotConnection apology | answers | answers |
+| `Claude_Fable` | answers | answers | answers |
+
+Invalid controls failed validation, so these are registered tones rather than pattern guesses. The
+paid scenario's metering carries `GPT62SolQuery*` and `GPT62AstraQuery*`, like GPT-6.1 Sol's
+budget. The two GPT-6.2 IDs therefore stay on the included scenario, while GPT-6 Astra joins
+`PAID_SCENARIO_TONES`.
+
+### F122 — credits, and how to distinguish the families 🟡
+
+StreamHub emitted `billing_info` with `serviceMeterName: "PremiumModelsInM365Chat"` and
+`status: "creditInUse"` on GPT-6.2 Astra and Claude Fable turns, but not on GPT-6.2 Sol.
+GPT Astra variants identify only as the GPT-6 reasoning model. Fable stopped naming itself on
+current routes, but reported a June 2026 training cutoff on both transports, while
+`Gpt_5_5_Chat` reported June 2024. Together with an earlier StreamHub self-ID as
+"Claude Fable 5.1", this resolves the former substituted-GPT reading and supports mapping it.
+
+### F123 — harness runs and shipped routing 🟢
+
+With StreamHub, agent-less `relay_batch`, no code interpreter and no image generation:
+
+| Harness | Model | Solved | M365 turns per run |
+|---|---|---:|---:|
+| Codex | `gpt-6.2-sol` | 3/3 | 2.3 |
+| Claude Code | `claude-fable` | 3/3 | 2.3 |
+| Codex | `claude-fable` | 3/3 | 3.3 |
+
+Codex also completed a one-run file task on GPT-6.2 Astra. The shipped mapping adds
+`gpt-6.2-sol`, `gpt-6.2-astra`, `gpt-6-astra`, `claude-fable` and
+`claude-fable-5.1`; arbitrary Fable-labelled IDs route to `Claude_Fable`. All four default to
+`relay_batch`. Their Chathub tool/multiturn checks passed agent-less. The GPT agent routes remain
+unclassified and retain the existing default behavior; Fable stays agent-less like Claude tones
+other than Opus.
+
+**Open H44a:** determine whether included-scenario GPT-6.2 turns reduce the paid scenario's
+`GPT62*Query*` counters. Compare metering before and after several included turns, as §27 did for
+GPT-6.1 Sol.

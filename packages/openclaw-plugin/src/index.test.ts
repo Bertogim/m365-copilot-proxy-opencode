@@ -65,6 +65,10 @@ describe("generateOpenClawConfig", () => {
     // A reasoning tone even though its ID has no `-think-deeper` suffix (#23).
     expect(models.find((m) => m.id === "gpt-6-sol")?.reasoning).toBe(true);
     expect(models.find((m) => m.id === "gpt-6.1-sol")).toMatchObject({ name: "GPT-6.1 Sol", reasoning: true });
+    expect(models.find((m) => m.id === "gpt-6.2-sol")).toMatchObject({ name: "GPT-6.2 Sol", reasoning: true });
+    expect(models.find((m) => m.id === "gpt-6.2-astra")).toMatchObject({ name: "GPT-6.2 Astra", reasoning: true });
+    expect(models.find((m) => m.id === "gpt-6-astra")).toMatchObject({ name: "GPT-6 Astra", reasoning: true });
+    expect(models.find((m) => m.id === "claude-fable")).toMatchObject({ name: "Claude Fable 5.1", reasoning: false });
     expect(models.find((m) => m.id === "gpt-5.6-think-deeper")?.reasoning).toBe(true);
     // Gpt_5_6_Chat is a chat tone, not a reasoning one — it must not inherit
     // its sibling's `reasoning` flag just because the version number matches.

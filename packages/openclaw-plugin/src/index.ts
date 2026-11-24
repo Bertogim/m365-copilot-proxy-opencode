@@ -43,6 +43,9 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "gpt-6-think-deeper": "GPT-6 Think Deeper",
   "gpt-6-sol": "GPT-6.0 Sol",
   "gpt-6.1-sol": "GPT-6.1 Sol",
+  "gpt-6.2-sol": "GPT-6.2 Sol",
+  "gpt-6.2-astra": "GPT-6.2 Astra",
+  "gpt-6-astra": "GPT-6 Astra",
   "gpt-5.6-think-deeper": "GPT-5.6 Think Deeper",
   "gpt-5.6": "GPT-5.6 Quick",
   "gpt-5.6-quick": "GPT-5.6 Quick",
@@ -65,12 +68,17 @@ const MODEL_DISPLAY_NAMES: Record<string, string> = {
   "claude-opus-5": "Claude Opus 5.5",
   "claude-opus-4.8": "Claude Opus 4.8 (premium, unmetered)",
   "claude-opus-4.5": "Claude Opus 4.8 (premium, unmetered)",
+  "claude-fable": "Claude Fable 5.1",
+  "claude-fable-5.1": "Claude Fable 5.1",
 };
 
 const REASONING_MODELS = new Set([
   "gpt-6-think-deeper",
   "gpt-6-sol",
   "gpt-6.1-sol",
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
+  "gpt-6-astra",
   "gpt-5.6-think-deeper",
   "think-deeper",
   "gpt-5.4", "gpt-5.4-think-deeper",
