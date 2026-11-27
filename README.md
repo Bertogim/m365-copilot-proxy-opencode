@@ -1,3 +1,18 @@
+# Project Abandoned (27/11/2026)
+
+This project has been abandoned since Microsoft's recent changes to AI usage limits.<br>
+In my experience, the usage limit that previously lasted me a full day is now reached in just 15 minutes.
+
+This means it is no longer maintained.
+
+It should still work for some time.
+
+The repository remains available for anyone interested in exploring, forking, or adapting the code.
+
+Unless Microsoft changes its limits to make the service viable to use again, this project will remain abandoned.
+
+Thanks to everyone who used or supported this project.
+
 # m365-copilot-proxy-opencode
 
 Fork of `m365-copilot-proxy` adapted for OpenCode and other OpenAI-compatible coding agents. It exposes Microsoft 365 Copilot through an OpenAI-compatible API while preserving the upstream reverse-engineering, tool-calling and benchmarking work.
